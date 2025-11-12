@@ -41,13 +41,43 @@ $(APP_SERVER): $(OBJS_SERVER)
 # ==========================
 #   실행 명령
 # ==========================
+ARGS := $(filter-out $@,$(MAKECMDGOALS))
+
 run-server: $(APP_SERVER)
-	@echo "🚀 Running TalkShell Server on port 5050..."
-	./$(APP_SERVER)
+	@set -- $(ARGS); \
+	if [ $$# -eq 0 ]; then \
+	  echo "🚀 Running $(APP_SERVER)"; \
+	  ./$(APP_SERVER); \
+	elif [ $$# -eq 1 ]; then \
+	  echo "🚀 Running $(APP_SERVER) → $$1"; \
+	  ./$(APP_SERVER) "$$1"; \
+	else \
+	  echo "🚀 Running $(APP_SERVER) → $$1:$$2"; \
+	  ./$(APP_SERVER) "$$1" "$$2"; \
+	fi
+
+ARGS := $(filter-out $@,$(MAKECMDGOALS))
 
 run-client: $(APP_CLIENT)
-	@echo "💬 Running TalkShell Client (TUI)..."
-	./$(APP_CLIENT) 192.168.71.78 
+	@set -- $(ARGS); \
+	if [ $$# -eq 0 ]; then \
+	  echo "💬 Running $(APP_CLIENT) → 127.0.0.1:5050"; \
+	  ./$(APP_CLIENT); \
+	elif [ $$# -eq 1 ]; then \
+	  echo "💬 Running $(APP_CLIENT) → $$1"; \
+	  ./$(APP_CLIENT) "$$1"; \
+	else \
+	  echo "💬 Running $(APP_CLIENT) → $$1:$$2"; \
+	  ./$(APP_CLIENT) "$$1" "$$2"; \
+	fi
+
+# make가 '127.0.0.1' 같은 추가 목표를 빌드하려고 하지 않도록 삼킴
+%:: ; @:
+
+# make run-client                      # 127.0.0.1:5050
+# make run-client HOST=192.168.0.42    # 192.168.0.42:5050
+# make run-client HOST=192.168.0.42 PORT=6000   # 192.168.0.42:6000
+# 세 개의 입력 모두 다 가능
 
 # ==========================
 #   정리 명령

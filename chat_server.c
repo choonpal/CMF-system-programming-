@@ -7,8 +7,8 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <sys/socket.h>
-#include <sys/stat.h>   // mkdir
-#include <dirent.h>     // opendir/readdir for optional checks
+#include <sys/stat.h> // mkdir
+#include <dirent.h>   // opendir/readdir for optional checks
 #include <errno.h>
 
 #define PORT 5050
@@ -17,16 +17,19 @@
 static int clients[MAX_CLIENTS];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
-void broadcast(const char *msg, int sender_sock) {
+void broadcast(const char *msg, int sender_sock)
+{
     pthread_mutex_lock(&lock);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
         if (clients[i] > 0 && clients[i] != sender_sock)
             send(clients[i], msg, strlen(msg), 0);
     }
     pthread_mutex_unlock(&lock);
 }
 
-void *client_handler(void *arg) {
+void *client_handler(void *arg)
+{
     int sock = *(int *)arg;
     free(arg);
 
@@ -43,31 +46,37 @@ void *client_handler(void *arg) {
     char buf[1024];
     char msg[1100];
 
-    while (1) {
+    while (1)
+    {
         ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
-        if (n <= 0) break;  // 클라이언트 종료 또는 오류
+        if (n <= 0)
+            break; // 클라이언트 종료 또는 오류
         buf[n] = 0;
 
         // ========== 명령어 처리 ==========
-        if (strncmp(buf, "cd ", 3) == 0) {
+        if (strncmp(buf, "cd ", 3) == 0)
+        {
             if (chdir(buf + 3) == 0)
                 send(sock, "OK: changed directory\n", 23, 0);
             else
                 send(sock, "ERR: invalid path\n", 19, 0);
-        } 
-        else if (strncmp(buf, "mkdir ", 6) == 0) {
+        }
+        else if (strncmp(buf, "mkdir ", 6) == 0)
+        {
             if (mkdir(buf + 6, 0755) == 0)
                 send(sock, "OK: dir created\n", 17, 0);
             else
                 send(sock, "ERR: mkdir failed\n", 19, 0);
-        } 
-        else if (strncmp(buf, "ls", 2) == 0) {
+        }
+        else if (strncmp(buf, "ls", 2) == 0)
+        {
             FILE *fp = popen("ls -al", "r");
             while (fgets(buf, sizeof(buf), fp))
                 send(sock, buf, strlen(buf), 0);
             pclose(fp);
-        } 
-        else {
+        }
+        else
+        {
             // 일반 메시지: 서버 콘솔 출력 + 다른 클라이언트에게 브로드캐스트
             printf("[%s:%d] %s\n", client_ip, client_port, buf);
             snprintf(msg, sizeof(msg), "client: %s\n", buf);
@@ -89,9 +98,10 @@ void *client_handler(void *arg) {
     return NULL;
 }
 
-int main(void) {
+int main(void)
+{
     // ✅ 서버 시작 시 자동으로 /home 디렉토리로 이동
-    (void)chdir("/home");   // 반환값 무시
+    (void)chdir("/home"); // 반환값 무시
     printf("📁 Server base directory: /home\n");
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
@@ -103,7 +113,8 @@ int main(void) {
     addr.sin_port = htons(PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
         perror("bind");
         exit(1);
     }
@@ -111,13 +122,15 @@ int main(void) {
     listen(srv, 5);
     printf("🚀 ChatOps server listening on port %d...\n", PORT);
 
-    while (1) {
+    while (1)
+    {
         struct sockaddr_in cliaddr;
         socklen_t clilen = sizeof(cliaddr);
         int *cli = malloc(sizeof(int));
         *cli = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
 
-        if (*cli < 0) {
+        if (*cli < 0)
+        {
             perror("accept");
             free(cli);
             continue;
@@ -130,7 +143,11 @@ int main(void) {
 
         pthread_mutex_lock(&lock);
         for (int i = 0; i < MAX_CLIENTS; i++)
-            if (clients[i] == 0) { clients[i] = *cli; break; }
+            if (clients[i] == 0)
+            {
+                clients[i] = *cli;
+                break;
+            }
         pthread_mutex_unlock(&lock);
 
         pthread_t tid;
