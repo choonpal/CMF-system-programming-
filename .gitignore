@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.out
+*.exe
+*.obj
+*.dll
+
+# Binaries & build dirs
+bin/
+build/
+dist/
+
+# Tools
+compile_commands.json
+tags
+*.log
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Vagrant
+.vagrant/
+
+# Project-specific
+tui_chatops
+chat_server
