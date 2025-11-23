@@ -8,6 +8,11 @@
 #include <stdio.h>
 #include <strings.h>
 
+#define LS_END_MARKER "ENDLS\n"
+
+/* ============================================================
+   작은 벡터 유틸
+   ============================================================ */
 static void vec_push(char ***arr, int *count, int *cap, const char *s)
 {
     if (*count + 1 > *cap)
@@ -27,9 +32,45 @@ static int cmp_str(const void *a, const void *b)
 }
 
 /* ============================================================
-   공통: 서버 연결 감지 함수
+   공통: 서버 연결 감지 + ls 전체 받는 함수
    ============================================================ */
-extern int socket_is_connected(void); // socket_client.c에 구현 필요
+extern int sockfd;
+
+int socket_is_connected(void)
+{
+    return (sockfd >= 0);
+}
+
+// 서버에서 ls 결과를 ENDLS 마커까지 모두 받아서 recvbuf에 저장
+static void recv_ls_all(char *recvbuf, size_t bufsize)
+{
+    recvbuf[0] = '\0';
+    char chunk[4096];
+
+    for (;;)
+    {
+        int n = socket_recv_response(chunk, sizeof(chunk));
+        if (n <= 0)
+            break;
+
+        if (strlen(recvbuf) + (size_t)n + 1 >= bufsize)
+        {
+            strncat(recvbuf, chunk, bufsize - strlen(recvbuf) - 1);
+            break;
+        }
+
+        strncat(recvbuf, chunk, bufsize - strlen(recvbuf) - 1);
+
+        // ENDLS 마커가 보이면 거기까지만 사용
+        if (strstr(recvbuf, LS_END_MARKER))
+            break;
+    }
+
+    // 마커 이후는 잘라냄
+    char *p = strstr(recvbuf, LS_END_MARKER);
+    if (p)
+        *p = '\0';
+}
 
 /* ============================================================
    상단: 현재 위치의 디렉토리 목록
@@ -57,29 +98,33 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
 
     if (socket_is_connected())
     {
-        // 🌐 서버에 요청
+        // 🌐 서버에 현재 디렉토리의 디렉토리 목록 요청
         socket_send_cmd("ls -al");
-        char buf[4096] = {0}, recvbuf[8192] = {0};
-        while (1)
-        {
-            int n = socket_recv_response(buf, sizeof(buf));
-            if (n <= 0)
-                break;
-            buf[n] = '\0';
-            strncat(recvbuf, buf, sizeof(recvbuf) - strlen(recvbuf) - 1);
-            if (n < (int)sizeof(buf) - 1)
-                break;
-        }
+
+        char recvbuf[16384];
+        recv_ls_all(recvbuf, sizeof(recvbuf));
 
         // 서버에서 받은 결과 파싱
         char *line = strtok(recvbuf, "\n");
         while (line)
         {
+            // 첫 줄 "total N" 같은 건 건너뜀
             if (line[0] == 'd')
             { // 디렉토리만 표시
+                char perms[11];
                 char name[256];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %s", name) == 1)
+
+                // -rw-r--r-- 1 user group size date name
+                if (sscanf(line, "%10s %*s %*s %*s %*s %*s %*s %*s %255s",
+                           perms, name) == 2)
+                {
+                    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+                    {
+                        line = strtok(NULL, "\n");
+                        continue;
+                    }
                     vec_push(&dl->items, &dl->count, &dl->cap, name);
+                }
             }
             line = strtok(NULL, "\n");
         }
@@ -128,7 +173,7 @@ void dirlist_draw(WINDOW *win, const DirList *dl, bool focused)
 }
 
 /* ============================================================
-   하단: 선택 디렉토리의 하위 파일/폴더 목록
+   하단: 선택 디렉토리의 하위 파일 목록
    ============================================================ */
 
 void filelist_init(FileList *fl)
@@ -153,26 +198,24 @@ void filelist_scan(FileList *fl, const char *dir_abs)
 
     if (socket_is_connected())
     {
+        // 🌐 서버에 파일 목록 요청
         socket_send_cmd("ls -al");
-        char buf[4096] = {0}, recvbuf[8192] = {0};
-        while (1)
-        {
-            int n = socket_recv_response(buf, sizeof(buf));
-            if (n <= 0)
-                break;
-            buf[n] = '\0';
-            strncat(recvbuf, buf, sizeof(recvbuf) - strlen(recvbuf) - 1);
-            if (n < (int)sizeof(buf) - 1)
-                break;
-        }
+
+        char recvbuf[16384];
+        recv_ls_all(recvbuf, sizeof(recvbuf));
+
         char *line = strtok(recvbuf, "\n");
         while (line)
         {
             if (line[0] == '-')
             { // 일반 파일만
+                char perms[11];
                 char name[256];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %s", name) == 1)
+                if (sscanf(line, "%10s %*s %*s %*s %*s %*s %*s %*s %255s",
+                           perms, name) == 2)
+                {
                     vec_push(&fl->items, &fl->count, &fl->cap, name);
+                }
             }
             line = strtok(NULL, "\n");
         }
@@ -214,9 +257,4 @@ void filelist_draw(WINDOW *win, const FileList *fl, bool focused)
             wattroff(win, A_REVERSE);
     }
     wrefresh(win);
-}
-int socket_is_connected(void)
-{
-
-    return (sockfd >= 0);
 }

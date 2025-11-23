@@ -1,4 +1,4 @@
-// chat_server.c — TalkShell ChatOps Server
+// chat_server.c — TalkShell ChatOps Server (fixed)
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +53,9 @@ void *client_handler(void *arg)
             break; // 클라이언트 종료 또는 오류
         buf[n] = 0;
 
+        // 개행 제거
+        buf[strcspn(buf, "\r\n")] = '\0';
+
         // ========== 명령어 처리 ==========
         if (strncmp(buf, "cd ", 3) == 0)
         {
@@ -71,9 +74,18 @@ void *client_handler(void *arg)
         else if (strncmp(buf, "ls", 2) == 0)
         {
             FILE *fp = popen("ls -al", "r");
-            while (fgets(buf, sizeof(buf), fp))
-                send(sock, buf, strlen(buf), 0);
-            pclose(fp);
+            if (!fp)
+            {
+                send(sock, "ERR: ls failed\n", 16, 0);
+            }
+            else
+            {
+                while (fgets(buf, sizeof(buf), fp))
+                    send(sock, buf, strlen(buf), 0);
+                pclose(fp);
+            }
+            const char *end = "ENDLS\n";
+            send(sock, end, strlen(end), 0);
         }
         else
         {
@@ -100,9 +112,13 @@ void *client_handler(void *arg)
 
 int main(void)
 {
-    // ✅ 서버 시작 시 자동으로 /home 디렉토리로 이동
-    (void)chdir("/home"); // 반환값 무시
-    printf("📁 Server base directory: /home\n");
+    // ✅ 서버 시작 시 사용자 HOME 디렉토리로 이동
+    const char *home = getenv("HOME");
+    if (home && *home)
+        chdir(home);
+    else
+        chdir("/home");
+    printf("📁 Server base directory: %s\n", home ? home : "/home");
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
