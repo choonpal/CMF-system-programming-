@@ -32,3 +32,6 @@ Thumbs.db
 # Project-specific
 tui_chatops
 chat_server
+
+#patch
+*.patch

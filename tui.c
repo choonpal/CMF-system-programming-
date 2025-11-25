@@ -49,9 +49,9 @@ static void layout_create(void) {
     box(win_chat,0,0);  mvwprintw(win_chat,0,2," 채팅 ");
     box(win_input,0,0); mvwprintw(win_input,0,2," 입력 ");
 
-    wrefresh(win_dir); 
-    wrefresh(win_file); 
-    wrefresh(win_chat); 
+    wrefresh(win_dir);
+    wrefresh(win_file);
+    wrefresh(win_chat);
     wrefresh(win_input);
 }
 
@@ -182,21 +182,21 @@ int main(int argc, char *argv[]) {
     }
 
     setlocale(LC_ALL, "");
-    initscr(); 
-    noecho(); 
-    cbreak(); 
-    keypad(stdscr, TRUE); 
+    initscr();
+    noecho();
+    cbreak();
+    keypad(stdscr, TRUE);
     curs_set(0);
     timeout(200); // getch() polling 주기
-    
+
     clear();
     refresh();
-    
+
     layout_create();
 
-    App app; 
+    App app;
     app_init(&app);   // 실행 즉시 바로 화면 표시
-    
+
     refresh();
 
 #ifdef USE_INOTIFY
