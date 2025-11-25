@@ -14,7 +14,12 @@
 #define PORT 5050
 #define MAX_CLIENTS 20
 
-static int clients[MAX_CLIENTS];
+typedef struct {
+    int sock;
+    char username[64];
+} ClientInfo;
+
+static ClientInfo clients[MAX_CLIENTS];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 void broadcast(const char *msg, int sender_sock)
@@ -22,16 +27,16 @@ void broadcast(const char *msg, int sender_sock)
     pthread_mutex_lock(&lock);
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (clients[i] > 0 && clients[i] != sender_sock)
-            send(clients[i], msg, strlen(msg), 0);
+        if (clients[i].sock > 0 && clients[i].sock != sender_sock)
+            send(clients[i].sock, msg, strlen(msg), 0);
     }
     pthread_mutex_unlock(&lock);
 }
 
 void *client_handler(void *arg)
 {
-    int sock = *(int *)arg;
-    free(arg);
+    ClientInfo *info = (ClientInfo *)arg;
+    int sock = info->sock;
 
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
@@ -57,7 +62,14 @@ void *client_handler(void *arg)
         buf[strcspn(buf, "\r\n")] = '\0';
 
         // ========== 명령어 처리 ==========
-        if (strncmp(buf, "cd ", 3) == 0)
+        if (strncmp(buf, "LOGIN ", 6) == 0)
+        {
+            snprintf(info->username, sizeof(info->username), "%.63s", buf + 6);
+            snprintf(msg, sizeof(msg), "[server] user set to %s\n", info->username);
+            send(sock, msg, strlen(msg), 0);
+            printf("[%s:%d] 로그인 사용자: %s\n", client_ip, client_port, info->username);
+        }
+        else if (strncmp(buf, "cd ", 3) == 0)
         {
             if (chdir(buf + 3) == 0)
                 send(sock, "OK: changed directory\n", 23, 0);
@@ -87,11 +99,21 @@ void *client_handler(void *arg)
             const char *end = "ENDLS\n";
             send(sock, end, strlen(end), 0);
         }
+        else if (strncmp(buf, "MSG ", 4) == 0)
+        {
+            const char *author = info->username[0] ? info->username : "anonymous";
+            const char *body = buf + 4;
+            printf("[%s:%d @ %s] %s\n", client_ip, client_port, author, body);
+            snprintf(msg, sizeof(msg), "%s: %s\n", author, body);
+            broadcast(msg, sock);
+            send(sock, "ACK: message received\n", 23, 0);
+        }
         else
         {
             // 일반 메시지: 서버 콘솔 출력 + 다른 클라이언트에게 브로드캐스트
-            printf("[%s:%d] %s\n", client_ip, client_port, buf);
-            snprintf(msg, sizeof(msg), "client: %s\n", buf);
+            const char *author = info->username[0] ? info->username : "client";
+            printf("[%s:%d @ %s] %s\n", client_ip, client_port, author, buf);
+            snprintf(msg, sizeof(msg), "%s: %s\n", author, buf);
             broadcast(msg, sock);
             send(sock, "ACK: message received\n", 23, 0);
         }
@@ -103,8 +125,11 @@ void *client_handler(void *arg)
     close(sock);
     pthread_mutex_lock(&lock);
     for (int i = 0; i < MAX_CLIENTS; i++)
-        if (clients[i] == sock)
-            clients[i] = 0;
+        if (clients[i].sock == sock)
+        {
+            clients[i].sock = 0;
+            clients[i].username[0] = '\0';
+        }
     pthread_mutex_unlock(&lock);
 
     return NULL;
@@ -142,13 +167,11 @@ int main(void)
     {
         struct sockaddr_in cliaddr;
         socklen_t clilen = sizeof(cliaddr);
-        int *cli = malloc(sizeof(int));
-        *cli = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
+        int cli = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
 
-        if (*cli < 0)
+        if (cli < 0)
         {
             perror("accept");
-            free(cli);
             continue;
         }
 
@@ -158,16 +181,26 @@ int main(void)
                ntohs(cliaddr.sin_port));
 
         pthread_mutex_lock(&lock);
+        ClientInfo *slot = NULL;
         for (int i = 0; i < MAX_CLIENTS; i++)
-            if (clients[i] == 0)
+            if (clients[i].sock == 0)
             {
-                clients[i] = *cli;
+                clients[i].sock = cli;
+                clients[i].username[0] = '\0';
+                slot = &clients[i];
                 break;
             }
         pthread_mutex_unlock(&lock);
 
+        if (!slot)
+        {
+            printf("⚠️  최대 동시 접속 수를 초과했습니다. 연결을 종료합니다.\n");
+            close(cli);
+            continue;
+        }
+
         pthread_t tid;
-        pthread_create(&tid, NULL, client_handler, cli);
+        pthread_create(&tid, NULL, client_handler, slot);
         pthread_detach(tid);
     }
 

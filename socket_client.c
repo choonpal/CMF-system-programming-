@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <errno.h>
 
 int sockfd = -1;
 
@@ -38,11 +39,39 @@ void socket_send_cmd(const char *cmd) {
     }
 }
 
+void socket_send_login(const char *username) {
+    if (sockfd < 0 || !username) return;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "LOGIN %s\n", username);
+    send(sockfd, buf, strlen(buf), 0);
+}
+
+void socket_send_chat(const char *msg) {
+    if (sockfd < 0 || !msg) return;
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "MSG %s\n", msg);
+    send(sockfd, buf, strlen(buf), 0);
+}
+
 int socket_recv_response(char *outbuf, size_t size) {
     if (sockfd < 0) return -1;
     int n = recv(sockfd, outbuf, size - 1, 0);
     if (n > 0) outbuf[n] = 0;
     return n;
+}
+
+int socket_recv_nonblock(char *outbuf, size_t size) {
+    if (sockfd < 0) return -1;
+    int n = recv(sockfd, outbuf, size, MSG_DONTWAIT);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return -2; // no data available now
+    }
+    if (n > 0 && (size_t)n < size) outbuf[n] = 0;
+    return n;
+}
+
+int socket_connected(void) {
+    return sockfd >= 0;
 }
 
 void socket_close(void) {
