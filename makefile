@@ -45,13 +45,13 @@ OBJS_SERVER = $(SRCS_SERVER:.c=.o)
 all: $(APP_CLIENT) $(APP_SERVER)
 
 $(APP_CLIENT): $(OBJS_CLIENT)
-	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS)
+        $(CC) $(OBJS_CLIENT) -o $@ $(LIBS)
 
 $(APP_SERVER): $(OBJS_SERVER)
-	$(CC) $(OBJS_SERVER) -o $@ -lpthread
+        $(CC) $(OBJS_SERVER) -o $@ -lpthread
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+        $(CC) $(CFLAGS) -c $< -o $@
 
 # ==========================
 #   실행 명령
@@ -59,32 +59,32 @@ $(APP_SERVER): $(OBJS_SERVER)
 ARGS := $(filter-out $@,$(MAKECMDGOALS))
 
 run-server: $(APP_SERVER)
-	@set -- $(ARGS); \
-	if [ $$# -eq 0 ]; then \
-	  echo "🚀 Running $(APP_SERVER)"; \
-	  ./$(APP_SERVER); \
-	elif [ $$# -eq 1 ]; then \
-	  echo "🚀 Running $(APP_SERVER) → $$1"; \
-	  ./$(APP_SERVER) "$$1"; \
-	else \
-	  echo "🚀 Running $(APP_SERVER) → $$1:$$2"; \
-	  ./$(APP_SERVER) "$$1" "$$2"; \
-	fi
+        @set -- $(ARGS); \
+        if [ $$# -eq 0 ]; then \
+          echo "🚀 Running $(APP_SERVER)"; \
+          ./$(APP_SERVER); \
+        elif [ $$# -eq 1 ]; then \
+          echo "🚀 Running $(APP_SERVER) → $$1"; \
+          ./$(APP_SERVER) "$$1"; \
+        else \
+          echo "🚀 Running $(APP_SERVER) → $$1:$$2"; \
+          ./$(APP_SERVER) "$$1" "$$2"; \
+        fi
 
 ARGS := $(filter-out $@,$(MAKECMDGOALS))
 
 run-client: $(APP_CLIENT)
-	@set -- $(ARGS); \
-	if [ $$# -eq 0 ]; then \
-	  echo "💬 Running $(APP_CLIENT) → 127.0.0.1:5050"; \
-	  ./$(APP_CLIENT); \
-	elif [ $$# -eq 1 ]; then \
-	  echo "💬 Running $(APP_CLIENT) → $$1"; \
-	  ./$(APP_CLIENT) "$$1"; \
-	else \
-	  echo "💬 Running $(APP_CLIENT) → $$1:$$2"; \
-	  ./$(APP_CLIENT) "$$1" "$$2"; \
-	fi
+        @set -- $(ARGS); \
+        if [ $$# -eq 0 ]; then \
+          echo "💬 Running $(APP_CLIENT) → 127.0.0.1:5050"; \
+          ./$(APP_CLIENT); \
+        elif [ $$# -eq 1 ]; then \
+          echo "💬 Running $(APP_CLIENT) → $$1"; \
+          ./$(APP_CLIENT) "$$1"; \
+        else \
+          echo "💬 Running $(APP_CLIENT) → $$1:$$2"; \
+          ./$(APP_CLIENT) "$$1" "$$2"; \
+        fi
 
 # make가 '127.0.0.1' 같은 추가 목표를 빌드하려고 하지 않도록 삼킴
 %:: ; @:
@@ -93,7 +93,7 @@ run-client: $(APP_CLIENT)
 #   정리 명령
 # ==========================
 clean:
-	rm -f $(OBJS_CLIENT) $(OBJS_SERVER) $(APP_CLIENT) $(APP_SERVER)
-	@echo "🧹 Cleaned build files"
+        rm -f $(OBJS_CLIENT) $(OBJS_SERVER) $(APP_CLIENT) $(APP_SERVER)
+        @echo "🧹 Cleaned build files"
 
 .PHONY: all clean run-server run-client
