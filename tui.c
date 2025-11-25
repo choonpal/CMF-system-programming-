@@ -1,4 +1,6 @@
+//vscode는 struct sigaction 쓰면 에러 띄우는데, 컴파일은 잘 되니까 신경 안 써도 됨. 그래도 오류 싫으면 sigaction 쓰지 말든지, 아래 라인 추가
 #define _XOPEN_SOURCE 700
+
 #include <locale.h> // 한글 인코딩
 #include <ncurses.h>
 #include <pthread.h>

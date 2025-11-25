@@ -2,6 +2,21 @@
 #   TalkShell Makefile
 # ==========================
 
+# 빌드 시 허용 형태:
+
+# make run-client → 기본 127.0.0.1:5050
+# make run-client 127.0.0.1:9190
+# make run-client 127.0.0.1 9190
+
+
+# make run-server
+
+# # (권장) 인자 전달 버전으로 변경 시:
+# make run-server 127.0.0.1 9190
+# # 또는
+# ./chat_server 127.0.0.1 9190
+
+
 APP_CLIENT = tui_chatops
 APP_SERVER = chat_server
 
@@ -73,11 +88,6 @@ run-client: $(APP_CLIENT)
 
 # make가 '127.0.0.1' 같은 추가 목표를 빌드하려고 하지 않도록 삼킴
 %:: ; @:
-
-# make run-client                      # 127.0.0.1:5050
-# make run-client HOST=192.168.0.42    # 192.168.0.42:5050
-# make run-client HOST=192.168.0.42 PORT=6000   # 192.168.0.42:6000
-# 세 개의 입력 모두 다 가능
 
 # ==========================
 #   정리 명령
