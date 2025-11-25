@@ -7,12 +7,14 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "socket_client.h"
 #include "dir_manager.h"
 #include "chat_manager.h"
 #include "input_manager.h"
 #include "utils.h"
+#include "auth_manager.h"
 
 #ifdef USE_INOTIFY
 #include <sys/inotify.h>
@@ -146,6 +148,12 @@ static int setup_inotify(const char *path) {
    ======================================================= */
 int main(int argc, char *argv[]) {
 
+    char login_user[64];
+    if (!authenticate_user(login_user, sizeof(login_user))) {
+        fprintf(stderr, "로그인에 실패했습니다. 프로그램을 종료합니다.\n");
+        return 1;
+    }
+
     // 기본 서버 주소/포트: 127.0.0.1:5050
     char host[256] = "127.0.0.1";
     int port = 5050;
@@ -169,6 +177,8 @@ int main(int argc, char *argv[]) {
     // 서버에 연결 시도 (실패하면 로컬모드로만 동작)
     if (socket_connect_to(host, port) < 0) {
         fprintf(stderr, "[tui] 서버(%s:%d) 연결 실패 → 로컬 모드로만 동작합니다.\n", host, port);
+    } else {
+        socket_send_login(login_user);
     }
 
     setlocale(LC_ALL, "");
@@ -198,6 +208,33 @@ int main(int argc, char *argv[]) {
     for (;;) {
         // 외부 로그 변경 감지
         chat_check_update(&app.chat);
+
+        // 서버에서 들어오는 메시지를 비동기로 폴링
+        if (socket_connected()) {
+            char rbuf[1024];
+            int n;
+            while ((n = socket_recv_nonblock(rbuf, sizeof(rbuf)-1)) > 0) {
+                char *saveptr = NULL;
+                char *line = strtok_r(rbuf, "\n", &saveptr);
+                while (line) {
+                    if (*line) {
+                        chat_append(&app.chat, "server", line);
+                        app.chat.dirty = 1;
+                    }
+                    line = strtok_r(NULL, "\n", &saveptr);
+                }
+            }
+            if (n == 0) {
+                // 연결이 끊어진 상태
+                chat_append(&app.chat, "system", "⚠️ 서버 연결이 종료되었습니다.");
+                app.chat.dirty = 1;
+                socket_close();
+            } else if (n < 0 && n != -2) {
+                chat_append(&app.chat, "system", "⚠️ 서버 연결이 종료되었습니다.");
+                app.chat.dirty = 1;
+                socket_close();
+            }
+        }
         if (app.chat.dirty) {
             app.chat.dirty = 0;
             chat_draw(win_chat, &app.chat);
@@ -295,6 +332,7 @@ int main(int argc, char *argv[]) {
                 }
                 else {
                     // 일반 채팅
+                    socket_send_chat(linebuf);
                     chat_append(&app.chat, safe_username(), linebuf);
                 }
 

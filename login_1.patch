@@ -1,0 +1,840 @@
+diff --git a/auth_manager.c b/auth_manager.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..22737e0f41bfbb899257ca62b67a53a0296e5bbc
+--- /dev/null
++++ b/auth_manager.c
+@@ -0,0 +1,97 @@
++#define _XOPEN_SOURCE 700
++#include "auth_manager.h"
++#include "utils.h"
++#include <crypt.h>
++#include <stdio.h>
++#include <string.h>
++#include <termios.h>
++#include <unistd.h>
++
++typedef struct {
++    const char *id;
++    const char *password_hash;
++} DummyAccount;
++
++// 사전에 준비된 더미 계정 (비밀번호는 해시 형태로만 보관)
++static const DummyAccount accounts[] = {
++    {"admin1", "$6$GQj5vxl1NCcrVA8I$FyFttXvfBPrK4z95YBxVxFf77szlqswY5KWpHX8BPSxB18WfbJf/LTzlENpWRxLlWAAaAT0fG7T7F24wfFiDj0"},
++    {"tester", "$6$tGQY7VxGzuqvhT60$6balVGqf6W5X.hFcqVW4hzphMOwys.MAIzQmYoFqiubKvIceRaMWgOGzxveR3XAsIw3sQILgR1xjF6gc7T4Oe/"}
++};
++static const size_t account_count = sizeof(accounts) / sizeof(accounts[0]);
++
++static void trim_newline(char *s) {
++    size_t len = strlen(s);
++    while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r')) {
++        s[--len] = '\0';
++    }
++}
++
++static void read_line(const char *prompt, char *out, size_t out_size) {
++    printf("%s", prompt);
++    fflush(stdout);
++    if (fgets(out, (int)out_size, stdin)) {
++        trim_newline(out);
++    } else {
++        out[0] = '\0';
++    }
++}
++
++static int capture_masked_input(const char *prompt, char *out, size_t out_size) {
++    struct termios oldt, newt;
++    if (tcgetattr(STDIN_FILENO, &oldt) != 0) return -1;
++    newt = oldt;
++    newt.c_lflag &= ~(ECHO);
++    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
++
++    printf("%s", prompt);
++    fflush(stdout);
++
++    size_t idx = 0; int ch;
++    while ((ch = getchar()) != '\n' && ch != EOF) {
++        if (ch == '\b' || ch == 127) {
++            if (idx > 0) {
++                idx--;
++                printf("\b \b");
++                fflush(stdout);
++            }
++            continue;
++        }
++        if (idx < out_size - 1) {
++            out[idx++] = (char)ch;
++            putchar('*');
++            fflush(stdout);
++        }
++    }
++    out[idx] = '\0';
++    printf("\n");
++    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
++    return (int)idx;
++}
++
++static bool verify_password(const DummyAccount *acc, const char *password) {
++    char *hashed = crypt(password, acc->password_hash);
++    return hashed && strcmp(hashed, acc->password_hash) == 0;
++}
++
++bool authenticate_user(char *out_username, size_t out_size) {
++    for (int attempt = 0; attempt < 3; ++attempt) {
++        char id[64];
++        char pw[128];
++
++        read_line("ID: ", id, sizeof(id));
++        if (capture_masked_input("Password: ", pw, sizeof(pw)) < 0) {
++            printf("비밀번호를 읽어오지 못했습니다.\n");
++            continue;
++        }
++
++        for (size_t i = 0; i < account_count; ++i) {
++            if (strcmp(id, accounts[i].id) == 0 && verify_password(&accounts[i], pw)) {
++                snprintf(out_username, out_size, "%s", id);
++                set_authenticated_user(id);
++                return true;
++            }
++        }
++        printf("❌ 잘못된 계정 정보입니다. 다시 시도하세요.\n\n");
++    }
++    return false;
++}
+diff --git a/auth_manager.h b/auth_manager.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fd3d7d44651f12e0d377ddeef053a1d73ed9a01
+--- /dev/null
++++ b/auth_manager.h
+@@ -0,0 +1,11 @@
++#ifndef AUTH_MANAGER_H
++#define AUTH_MANAGER_H
++
++#include <stdbool.h>
++#include <stddef.h>
++
++// 로그인 절차를 진행하고 성공 시 사용자명을 out_username에 채운다.
++// 최대 3회까지 입력을 허용하며, 실패 시 false를 반환한다.
++bool authenticate_user(char *out_username, size_t out_size);
++
++#endif
+diff --git a/chat_server.c b/chat_server.c
+index 1ffae1ff8be6e844136e44e784829b6e67c4c24c..116984c4ef30ec5595bc2b18242397422367dfa2 100644
+--- a/chat_server.c
++++ b/chat_server.c
+@@ -1,176 +1,209 @@
+ // chat_server.c — TalkShell ChatOps Server (fixed)
+ #define _GNU_SOURCE
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <arpa/inet.h>
+ #include <pthread.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h> // mkdir
+ #include <dirent.h>   // opendir/readdir for optional checks
+ #include <errno.h>
+ 
+ #define PORT 5050
+ #define MAX_CLIENTS 20
+ 
+-static int clients[MAX_CLIENTS];
++typedef struct {
++    int sock;
++    char username[64];
++} ClientInfo;
++
++static ClientInfo clients[MAX_CLIENTS];
+ pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ void broadcast(const char *msg, int sender_sock)
+ {
+     pthread_mutex_lock(&lock);
+     for (int i = 0; i < MAX_CLIENTS; i++)
+     {
+-        if (clients[i] > 0 && clients[i] != sender_sock)
+-            send(clients[i], msg, strlen(msg), 0);
++        if (clients[i].sock > 0 && clients[i].sock != sender_sock)
++            send(clients[i].sock, msg, strlen(msg), 0);
+     }
+     pthread_mutex_unlock(&lock);
+ }
+ 
+ void *client_handler(void *arg)
+ {
+-    int sock = *(int *)arg;
+-    free(arg);
++    ClientInfo *info = (ClientInfo *)arg;
++    int sock = info->sock;
+ 
+     struct sockaddr_in addr;
+     socklen_t len = sizeof(addr);
+     getpeername(sock, (struct sockaddr *)&addr, &len);
+ 
+     char client_ip[INET_ADDRSTRLEN];
+     inet_ntop(AF_INET, &addr.sin_addr, client_ip, sizeof(client_ip));
+     int client_port = ntohs(addr.sin_port);
+ 
+     printf("🟢 Client connected: %s:%d\n", client_ip, client_port);
+ 
+     char buf[1024];
+     char msg[1100];
+ 
+     while (1)
+     {
+         ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+         if (n <= 0)
+             break; // 클라이언트 종료 또는 오류
+         buf[n] = 0;
+ 
+         // 개행 제거
+         buf[strcspn(buf, "\r\n")] = '\0';
+ 
+         // ========== 명령어 처리 ==========
+-        if (strncmp(buf, "cd ", 3) == 0)
++        if (strncmp(buf, "LOGIN ", 6) == 0)
++        {
++            snprintf(info->username, sizeof(info->username), "%.63s", buf + 6);
++            snprintf(msg, sizeof(msg), "[server] user set to %s\n", info->username);
++            send(sock, msg, strlen(msg), 0);
++            printf("[%s:%d] 로그인 사용자: %s\n", client_ip, client_port, info->username);
++        }
++        else if (strncmp(buf, "cd ", 3) == 0)
+         {
+             if (chdir(buf + 3) == 0)
+                 send(sock, "OK: changed directory\n", 23, 0);
+             else
+                 send(sock, "ERR: invalid path\n", 19, 0);
+         }
+         else if (strncmp(buf, "mkdir ", 6) == 0)
+         {
+             if (mkdir(buf + 6, 0755) == 0)
+                 send(sock, "OK: dir created\n", 17, 0);
+             else
+                 send(sock, "ERR: mkdir failed\n", 19, 0);
+         }
+         else if (strncmp(buf, "ls", 2) == 0)
+         {
+             FILE *fp = popen("ls -al", "r");
+             if (!fp)
+             {
+                 send(sock, "ERR: ls failed\n", 16, 0);
+             }
+             else
+             {
+                 while (fgets(buf, sizeof(buf), fp))
+                     send(sock, buf, strlen(buf), 0);
+                 pclose(fp);
+             }
+             const char *end = "ENDLS\n";
+             send(sock, end, strlen(end), 0);
+         }
++        else if (strncmp(buf, "MSG ", 4) == 0)
++        {
++            const char *author = info->username[0] ? info->username : "anonymous";
++            const char *body = buf + 4;
++            printf("[%s:%d @ %s] %s\n", client_ip, client_port, author, body);
++            snprintf(msg, sizeof(msg), "%s: %s\n", author, body);
++            broadcast(msg, sock);
++            send(sock, "ACK: message received\n", 23, 0);
++        }
+         else
+         {
+             // 일반 메시지: 서버 콘솔 출력 + 다른 클라이언트에게 브로드캐스트
+-            printf("[%s:%d] %s\n", client_ip, client_port, buf);
+-            snprintf(msg, sizeof(msg), "client: %s\n", buf);
++            const char *author = info->username[0] ? info->username : "client";
++            printf("[%s:%d @ %s] %s\n", client_ip, client_port, author, buf);
++            snprintf(msg, sizeof(msg), "%s: %s\n", author, buf);
+             broadcast(msg, sock);
+             send(sock, "ACK: message received\n", 23, 0);
+         }
+     }
+ 
+     // 연결 종료 로그
+     printf("🔴 Client disconnected: %s:%d\n", client_ip, client_port);
+ 
+     close(sock);
+     pthread_mutex_lock(&lock);
+     for (int i = 0; i < MAX_CLIENTS; i++)
+-        if (clients[i] == sock)
+-            clients[i] = 0;
++        if (clients[i].sock == sock)
++        {
++            clients[i].sock = 0;
++            clients[i].username[0] = '\0';
++        }
+     pthread_mutex_unlock(&lock);
+ 
+     return NULL;
+ }
+ 
+ int main(void)
+ {
+     // ✅ 서버 시작 시 사용자 HOME 디렉토리로 이동
+     const char *home = getenv("HOME");
+     if (home && *home)
+         chdir(home);
+     else
+         chdir("/home");
+     printf("📁 Server base directory: %s\n", home ? home : "/home");
+ 
+     int srv = socket(AF_INET, SOCK_STREAM, 0);
+     int opt = 1;
+     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+ 
+     struct sockaddr_in addr = {0};
+     addr.sin_family = AF_INET;
+     addr.sin_port = htons(PORT);
+     addr.sin_addr.s_addr = INADDR_ANY;
+ 
+     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+     {
+         perror("bind");
+         exit(1);
+     }
+ 
+     listen(srv, 5);
+     printf("🚀 ChatOps server listening on port %d...\n", PORT);
+ 
+     while (1)
+     {
+         struct sockaddr_in cliaddr;
+         socklen_t clilen = sizeof(cliaddr);
+-        int *cli = malloc(sizeof(int));
+-        *cli = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
++        int cli = accept(srv, (struct sockaddr *)&cliaddr, &clilen);
+ 
+-        if (*cli < 0)
++        if (cli < 0)
+         {
+             perror("accept");
+-            free(cli);
+             continue;
+         }
+ 
+         // 🔗 클라이언트 접속 로그
+         printf("🔗 New client connected from %s:%d\n",
+                inet_ntoa(cliaddr.sin_addr),
+                ntohs(cliaddr.sin_port));
+ 
+         pthread_mutex_lock(&lock);
++        ClientInfo *slot = NULL;
+         for (int i = 0; i < MAX_CLIENTS; i++)
+-            if (clients[i] == 0)
++            if (clients[i].sock == 0)
+             {
+-                clients[i] = *cli;
++                clients[i].sock = cli;
++                clients[i].username[0] = '\0';
++                slot = &clients[i];
+                 break;
+             }
+         pthread_mutex_unlock(&lock);
+ 
++        if (!slot)
++        {
++            printf("⚠️  최대 동시 접속 수를 초과했습니다. 연결을 종료합니다.\n");
++            close(cli);
++            continue;
++        }
++
+         pthread_t tid;
+-        pthread_create(&tid, NULL, client_handler, cli);
++        pthread_create(&tid, NULL, client_handler, slot);
+         pthread_detach(tid);
+     }
+ 
+     close(srv);
+     return 0;
+ }
+diff --git a/makefile b/makefile
+index b2caf452cee73da5ebdd69ceacfa934f2585414b..16f74b6ed92940fb11d028f5f241472ce4aeb5d0 100644
+--- a/makefile
++++ b/makefile
+@@ -1,61 +1,61 @@
+ # ==========================
+ #   TalkShell Makefile
+ # ==========================
+ 
+ # 빌드 시 허용 형태:
+ 
+ # make run-client → 기본 127.0.0.1:5050
+ # make run-client 127.0.0.1:9190
+ # make run-client 127.0.0.1 9190
+ 
+ 
+ # make run-server
+ 
+ # # (권장) 인자 전달 버전으로 변경 시:
+ # make run-server 127.0.0.1 9190
+ # # 또는
+ # ./chat_server 127.0.0.1 9190
+ 
+ 
+ APP_CLIENT = tui_chatops
+ APP_SERVER = chat_server
+ 
+ CFLAGS = -Wall -Wextra -O2 -D_XOPEN_SOURCE=700
+-LIBS = -lncursesw -lpthread
++LIBS = -lncursesw -lpthread -lcrypt
+ 
+ # detect OS
+ UNAME_S := $(shell uname -s)
+ ifeq ($(UNAME_S),Darwin)
+   LIBS = -lncurses -lpthread
+ endif
+ 
+ ifdef USE_INOTIFY
+   CFLAGS += -DUSE_INOTIFY
+ endif
+ 
+-SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c
++SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c auth_manager.c
+ OBJS_CLIENT = $(SRCS_CLIENT:.c=.o)
+ 
+ SRCS_SERVER = chat_server.c
+ OBJS_SERVER = $(SRCS_SERVER:.c=.o)
+ 
+ # ==========================
+ #   기본 빌드 대상
+ # ==========================
+ all: $(APP_CLIENT) $(APP_SERVER)
+ 
+ $(APP_CLIENT): $(OBJS_CLIENT)
+ 	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS)
+ 
+ $(APP_SERVER): $(OBJS_SERVER)
+ 	$(CC) $(OBJS_SERVER) -o $@ -lpthread
+ 
+ %.o: %.c
+ 	$(CC) $(CFLAGS) -c $< -o $@
+ 
+ # ==========================
+ #   실행 명령
+ # ==========================
+ ARGS := $(filter-out $@,$(MAKECMDGOALS))
+ 
+ run-server: $(APP_SERVER)
+diff --git a/socket_client.c b/socket_client.c
+index 3b0b91b5aa7874be9e5135088816a65e317772b6..878b98204bfbe6a3d31370d172ebed634b57956b 100644
+--- a/socket_client.c
++++ b/socket_client.c
+@@ -1,53 +1,82 @@
+ #include "socket_client.h"
+ #include <stdio.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <arpa/inet.h>
+ #include <sys/socket.h>
++#include <errno.h>
+ 
+ int sockfd = -1;
+ 
+ int socket_connect_to(const char *server_ip, int port) {
+     struct sockaddr_in serv;
+     sockfd = socket(AF_INET, SOCK_STREAM, 0);
+     if (sockfd < 0) return -1;
+ 
+     memset(&serv, 0, sizeof(serv));
+     serv.sin_family = AF_INET;
+     serv.sin_port = htons(port);
+     if (inet_pton(AF_INET, server_ip, &serv.sin_addr) <= 0) {
+         close(sockfd);
+         sockfd = -1;
+         return -1;
+     }
+     if (connect(sockfd, (struct sockaddr*)&serv, sizeof(serv)) < 0) {
+         close(sockfd);
+         sockfd = -1;
+         return -1;
+     }
+     return 0;
+ }
+ 
+ void socket_send_cmd(const char *cmd) {
+     if (sockfd >= 0) {
+         send(sockfd, cmd, strlen(cmd), 0);
+         // 개행 없으면 하나 추가해줘도 됨 (서버가 \n 기준으로 처리할 때)
+         if (strchr(cmd, '\n') == NULL) {
+             send(sockfd, "\n", 1, 0);
+         }
+     }
+ }
+ 
++void socket_send_login(const char *username) {
++    if (sockfd < 0 || !username) return;
++    char buf[256];
++    snprintf(buf, sizeof(buf), "LOGIN %s\n", username);
++    send(sockfd, buf, strlen(buf), 0);
++}
++
++void socket_send_chat(const char *msg) {
++    if (sockfd < 0 || !msg) return;
++    char buf[1024];
++    snprintf(buf, sizeof(buf), "MSG %s\n", msg);
++    send(sockfd, buf, strlen(buf), 0);
++}
++
+ int socket_recv_response(char *outbuf, size_t size) {
+     if (sockfd < 0) return -1;
+     int n = recv(sockfd, outbuf, size - 1, 0);
+     if (n > 0) outbuf[n] = 0;
+     return n;
+ }
+ 
++int socket_recv_nonblock(char *outbuf, size_t size) {
++    if (sockfd < 0) return -1;
++    int n = recv(sockfd, outbuf, size, MSG_DONTWAIT);
++    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++        return -2; // no data available now
++    }
++    if (n > 0 && (size_t)n < size) outbuf[n] = 0;
++    return n;
++}
++
++int socket_connected(void) {
++    return sockfd >= 0;
++}
++
+ void socket_close(void) {
+     if (sockfd >= 0) {
+         close(sockfd);
+         sockfd = -1;
+     }
+ }
+diff --git a/socket_client.h b/socket_client.h
+index c12f3b74c5071292f16aeeefb87c317651ef0751..b274b5b6d706c43b4a3ee23e6d0f15ddd7cbef5e 100644
+--- a/socket_client.h
++++ b/socket_client.h
+@@ -1,11 +1,15 @@
+ #ifndef SOCKET_CLIENT_H
+ #define SOCKET_CLIENT_H
+ 
+ #include <stddef.h>
+ extern int sockfd;
+ int socket_connect_to(const char *server_ip, int port);
+ void socket_send_cmd(const char *cmd);
++void socket_send_login(const char *username);
++void socket_send_chat(const char *msg);
+ int socket_recv_response(char *outbuf, size_t size);
++int socket_recv_nonblock(char *outbuf, size_t size);
++int socket_connected(void);
+ void socket_close(void);
+ 
+ #endif
+diff --git a/tui.c b/tui.c
+index 81d4e9429262eea5a37e0fa565c486bb3e8d6a26..c940cae0a25e8415e17a48eb9e748233c24f47c8 100644
+--- a/tui.c
++++ b/tui.c
+@@ -1,40 +1,42 @@
+ //vscode는 struct sigaction 쓰면 에러 띄우는데, 컴파일은 잘 되니까 신경 안 써도 됨. 그래도 오류 싫으면 sigaction 쓰지 말든지, 아래 라인 추가
+ #define _XOPEN_SOURCE 700
+ 
+ #include <locale.h> // 한글 인코딩
+ #include <ncurses.h>
+ #include <pthread.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <errno.h>
+ 
+ #include "socket_client.h"
+ #include "dir_manager.h"
+ #include "chat_manager.h"
+ #include "input_manager.h"
+ #include "utils.h"
++#include "auth_manager.h"
+ 
+ #ifdef USE_INOTIFY
+ #include <sys/inotify.h>
+ #include <fcntl.h>
+ #endif
+ 
+ static WINDOW *win_dir, *win_file, *win_chat, *win_input;
+ 
+ typedef struct {
+     DirList dl;
+     FileList fl;
+     ChatState chat;
+     FocusArea focus;
+ } App;
+ 
+ /* =======================================================
+    레이아웃 구성
+    ======================================================= */
+ static void layout_create(void) {
+     int h,w; getmaxyx(stdscr,h,w);
+     int left_w = w/3;
+     int right_w = w - left_w;
+     int chat_h = h - 3;
+ 
+     win_dir   = newwin(h/2, left_w, 0, 0);
+@@ -124,102 +126,137 @@ static void open_selected_dir(App *a) {
+ static void go_parent_dir(App *a) {
+     char parent[PATH_MAX]; dirname_of(parent, a->dl.cwd);
+     if (!is_directory(parent) || strcmp(parent, a->dl.cwd)==0) return;
+     dirlist_scan(&a->dl, parent);
+     dirlist_draw(win_dir, &a->dl, a->focus==FOCUS_DIR);
+     open_selected_dir(a);
+ }
+ 
+ /* =======================================================
+    inotify (Linux용)
+    ======================================================= */
+ #ifdef USE_INOTIFY
+ static int setup_inotify(const char *path) {
+     int fd = inotify_init1(IN_NONBLOCK);
+     if (fd < 0) return -1;
+     inotify_add_watch(fd, path, IN_MODIFY|IN_CLOSE_WRITE|IN_MOVE_SELF|IN_DELETE_SELF);
+     return fd;
+ }
+ #endif
+ 
+ /* =======================================================
+    메인 루프
+    ======================================================= */
+ int main(int argc, char *argv[]) {
+ 
++    char login_user[64];
++    if (!authenticate_user(login_user, sizeof(login_user))) {
++        fprintf(stderr, "로그인에 실패했습니다. 프로그램을 종료합니다.\n");
++        return 1;
++    }
++
+     // 기본 서버 주소/포트: 127.0.0.1:5050
+     char host[256] = "127.0.0.1";
+     int port = 5050;
+ 
+     if (argc >= 3) {
+         strncpy(host, argv[1], sizeof(host)-1);
+         host[sizeof(host)-1] = '\0';
+         int p = atoi(argv[2]);
+         if (p > 0) port = p;
+     } else if (argc >= 2) {
+         strncpy(host, argv[1], sizeof(host)-1);
+         host[sizeof(host)-1] = '\0';
+         char *colon = strrchr(host, ':');
+         if (colon) {
+             *colon = '\0';
+             int p = atoi(colon+1);
+             if (p > 0) port = p;
+         }
+     }
+ 
+     // 서버에 연결 시도 (실패하면 로컬모드로만 동작)
+     if (socket_connect_to(host, port) < 0) {
+         fprintf(stderr, "[tui] 서버(%s:%d) 연결 실패 → 로컬 모드로만 동작합니다.\n", host, port);
++    } else {
++        socket_send_login(login_user);
+     }
+ 
+     setlocale(LC_ALL, "");
+     initscr(); 
+     noecho(); 
+     cbreak(); 
+     keypad(stdscr, TRUE); 
+     curs_set(0);
+     timeout(200); // getch() polling 주기
+     
+     clear();
+     refresh();
+     
+     layout_create();
+ 
+     App app; 
+     app_init(&app);   // 실행 즉시 바로 화면 표시
+     
+     refresh();
+ 
+ #ifdef USE_INOTIFY
+     int inofd = setup_inotify(app.chat.log_path);
+ #endif
+ 
+     char linebuf[4096]={0};
+ 
+     for (;;) {
+         // 외부 로그 변경 감지
+         chat_check_update(&app.chat);
++
++        // 서버에서 들어오는 메시지를 비동기로 폴링
++        if (socket_connected()) {
++            char rbuf[1024];
++            int n;
++            while ((n = socket_recv_nonblock(rbuf, sizeof(rbuf)-1)) > 0) {
++                char *saveptr = NULL;
++                char *line = strtok_r(rbuf, "\n", &saveptr);
++                while (line) {
++                    if (*line) {
++                        chat_append(&app.chat, "server", line);
++                        app.chat.dirty = 1;
++                    }
++                    line = strtok_r(NULL, "\n", &saveptr);
++                }
++            }
++            if (n == 0) {
++                // 연결이 끊어진 상태
++                chat_append(&app.chat, "system", "⚠️ 서버 연결이 종료되었습니다.");
++                app.chat.dirty = 1;
++                socket_close();
++            } else if (n < 0 && n != -2) {
++                chat_append(&app.chat, "system", "⚠️ 서버 연결이 종료되었습니다.");
++                app.chat.dirty = 1;
++                socket_close();
++            }
++        }
+         if (app.chat.dirty) {
+             app.chat.dirty = 0;
+             chat_draw(win_chat, &app.chat);
+         }
+ 
+ #ifdef USE_INOTIFY
+         if (inofd >= 0) {
+             char buf[1024];
+             int n = read(inofd, buf, sizeof(buf));
+             if (n > 0) app.chat.dirty = 1;
+         }
+ #endif
+ 
+         int ch = getch();
+         if (ch == ERR) continue;
+         if (ch == 'q' || ch == 'Q') break;
+ 
+         switch (app.focus) {
+         case FOCUS_DIR:
+             if (ch == KEY_UP) {
+                 if (app.dl.selected>0) app.dl.selected--;
+                 dirlist_draw(win_dir,&app.dl,true);
+             } else if (ch==KEY_DOWN) {
+                 if (app.dl.selected<app.dl.count-1) app.dl.selected++;
+                 dirlist_draw(win_dir,&app.dl,true);
+@@ -273,43 +310,44 @@ int main(int argc, char *argv[]) {
+                 input_draw(win_input);
+                 wmove(win_input,1,4);
+                 linebuf[0]='\0';
+                 input_capture_line(win_input, linebuf, sizeof(linebuf));
+ 
+                 if (strlen(linebuf) == 0) {
+                     app.focus = FOCUS_CHAT;
+                     break;
+                 }
+ 
+                 // 서버 명령: cd / mkdir (ls는 여기서 안 보냄!)
+                 if (strncmp(linebuf, "cd ", 3) == 0 ||
+                     strncmp(linebuf, "mkdir ", 6) == 0)
+                 {
+                     socket_send_cmd(linebuf);
+ 
+                     char response[2048];
+                     while (socket_recv_response(response, sizeof(response)) > 0) {
+                         chat_append(&app.chat, "server", response);
+                         if (strstr(response, "OK") || strstr(response, "ERR"))
+                             break;
+                     }
+                 }
+                 else {
+                     // 일반 채팅
++                    socket_send_chat(linebuf);
+                     chat_append(&app.chat, safe_username(), linebuf);
+                 }
+ 
+                 app.chat.dirty = 1;
+                 app.focus = FOCUS_CHAT;
+             }
+             break;
+         }
+ 
+         if (ch=='\t') change_focus(&app, +1);
+         else if (ch==KEY_BTAB) change_focus(&app, -1);
+     }
+ 
+     app_free(&app);
+     endwin();
+     socket_close();
+     return 0;
+ }
+diff --git a/utils.c b/utils.c
+index 4b19128231b63c43113f703b8858e60c2d74a0bb..a0b56c11e7cc8b9adaf62adcaa1987ab8a5b5849 100644
+--- a/utils.c
++++ b/utils.c
+@@ -41,40 +41,51 @@ void dirname_of(char out[PATH_MAX], const char *path) {
+ }
+ 
+ void ensure_dir(const char *path) {
+     // mkdir -p
+     char buf[PATH_MAX]; snprintf(buf, sizeof(buf), "%s", path);
+     for (char *p = buf + 1; *p; ++p) {
+         if (*p == '/') { *p = '\0'; mkdir(buf, 0700); *p = '/'; }
+     }
+     mkdir(buf, 0700);
+ }
+ 
+ void get_home(char out[PATH_MAX]) {
+     const char *h = getenv("HOME");
+     if (h && *h) { snprintf(out, PATH_MAX, "%s", h); return; }
+     struct passwd *pw = getpwuid(getuid());
+     snprintf(out, PATH_MAX, "%s", pw? pw->pw_dir : "/tmp");
+ }
+ 
+ static void sanitize(char *s) {
+     for (char *p=s; *p; ++p) {
+         if (*p=='/') *p='_';
+         else if (*p==' ') *p='-';
+     }
+ }
+ 
++static char auth_user[64] = "";
++
++void set_authenticated_user(const char *username) {
++    if (username && *username) {
++        snprintf(auth_user, sizeof(auth_user), "%s", username);
++    } else {
++        auth_user[0] = '\0';
++    }
++}
++
+ void make_log_path(char out[PATH_MAX], const char *dir_abs) {
+     char home[PATH_MAX]; get_home(home);
+     char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", dir_abs);
+     sanitize(base);
+     char root[PATH_MAX]; snprintf(root, sizeof(root), "%s/.tui_chatops/chatlogs", home);
+     ensure_dir(root);
+     snprintf(out, PATH_MAX, "%s/%s.log", root, base[0]?base:"root");
+ }
+ 
+ const char* safe_username(void) {
++    if (auth_user[0]) return auth_user;
+     const char *u = getenv("USER");
+     if (u && *u) return u;
+     struct passwd *pw = getpwuid(getuid());
+     return pw && pw->pw_name ? pw->pw_name : "user";
+ }
+diff --git a/utils.h b/utils.h
+index 57f1435e746d8cbce5a0e10bbb5c1f2ad4981bd7..a96be57b6c2ca40363b6281fae87ab16033ebd66 100644
+--- a/utils.h
++++ b/utils.h
+@@ -1,22 +1,23 @@
+ #ifndef UTILS_H
+ #define UTILS_H
+ 
+ #include <limits.h>
+ #include <stdbool.h>
+ 
+ #ifndef PATH_MAX
+ #define PATH_MAX 4096
+ #endif
+ 
+ bool is_directory(const char *path);
+ bool is_regular(const char *path);
+ void path_join(char out[PATH_MAX], const char *a, const char *b);
+ void abspath(char out[PATH_MAX], const char *path);
+ void dirname_of(char out[PATH_MAX], const char *path);
+ 
+ void ensure_dir(const char *path);                    // mkdir -p
+ void get_home(char out[PATH_MAX]);                    // ~ 경로
+ void make_log_path(char out[PATH_MAX], const char *dir_abs); // ~/.tui_chatops/chatlogs/xxxx.log
+ const char* safe_username(void);
++void set_authenticated_user(const char *username);
+ 
+ #endif

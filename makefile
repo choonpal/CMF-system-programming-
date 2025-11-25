@@ -21,7 +21,7 @@ APP_CLIENT = tui_chatops
 APP_SERVER = chat_server
 
 CFLAGS = -Wall -Wextra -O2 -D_XOPEN_SOURCE=700
-LIBS = -lncursesw -lpthread
+LIBS = -lncursesw -lpthread -lcrypt
 
 # detect OS
 UNAME_S := $(shell uname -s)
@@ -33,7 +33,7 @@ ifdef USE_INOTIFY
   CFLAGS += -DUSE_INOTIFY
 endif
 
-SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c
+SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c auth_manager.c
 OBJS_CLIENT = $(SRCS_CLIENT:.c=.o)
 
 SRCS_SERVER = chat_server.c

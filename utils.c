@@ -63,6 +63,16 @@ static void sanitize(char *s) {
     }
 }
 
+static char auth_user[64] = "";
+
+void set_authenticated_user(const char *username) {
+    if (username && *username) {
+        snprintf(auth_user, sizeof(auth_user), "%s", username);
+    } else {
+        auth_user[0] = '\0';
+    }
+}
+
 void make_log_path(char out[PATH_MAX], const char *dir_abs) {
     char home[PATH_MAX]; get_home(home);
     char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", dir_abs);
@@ -73,6 +83,7 @@ void make_log_path(char out[PATH_MAX], const char *dir_abs) {
 }
 
 const char* safe_username(void) {
+    if (auth_user[0]) return auth_user;
     const char *u = getenv("USER");
     if (u && *u) return u;
     struct passwd *pw = getpwuid(getuid());
