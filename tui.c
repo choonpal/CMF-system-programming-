@@ -67,7 +67,7 @@ static void app_init(App *a)
     memset(a, 0, sizeof(*a));
     a->focus = FOCUS_DIR;
 
-    // 시작 디렉토리 지정
+    // 시작 디렉토리 지정(🔧 나중에 하드코딩 루트를 바꾸려면 이 값을 수정)
     const char *start_dir = "/home";
     char absdir[PATH_MAX];
     abspath(absdir, start_dir);
@@ -140,8 +140,16 @@ static void go_parent_dir(App *a)
 {
     char parent[PATH_MAX];
     dirname_of(parent, a->dl.cwd);
-    if (!is_directory(parent) || strcmp(parent, a->dl.cwd) == 0)
+    // 📡 원격/로컬 모두 상위 이동이 가능하도록 유효성 검사 분리
+    if (socket_is_connected())
+    {
+        if (strcmp(parent, a->dl.cwd) == 0)
+            return;
+    }
+    else if (!is_directory(parent) || strcmp(parent, a->dl.cwd) == 0)
+    {
         return;
+    }
     dirlist_scan(&a->dl, parent);
     dirlist_draw(win_dir, &a->dl, a->focus == FOCUS_DIR);
     open_selected_dir(a);
@@ -296,7 +304,8 @@ int main(int argc, char *argv[])
                 {
                     char tgt[PATH_MAX];
                     path_join(tgt, app.fl.base, app.fl.items[app.fl.selected]);
-                    if (is_directory(tgt))
+                    // 📂 원격일 때는 로컬 파일 검사 대신 바로 이동 시도
+                    if (socket_is_connected() || is_directory(tgt))
                     {
                         dirlist_scan(&app.dl, tgt);
                         dirlist_draw(win_dir, &app.dl, app.focus == FOCUS_DIR);

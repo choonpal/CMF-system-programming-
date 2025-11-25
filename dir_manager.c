@@ -57,7 +57,24 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
 
     if (socket_is_connected())
     {
-        // 🌐 서버에 요청
+        // 🌐 서버에 요청: 원격에서도 실제 경로를 맞춰주기 위해 cd 후 ls 수행
+        char cd_cmd[PATH_MAX + 4];
+        snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", cwd_abs);
+        socket_send_cmd(cd_cmd);
+
+        // cd 결과는 단순 확인만 하고 무시(OK/ERR 문구만 받아서 비워줌)
+        char cd_resp[512];
+        while (1)
+        {
+            int rn = socket_recv_response(cd_resp, sizeof(cd_resp));
+            if (rn <= 0)
+                break;
+            cd_resp[rn] = '\0';
+            if (strstr(cd_resp, "OK") || strstr(cd_resp, "ERR"))
+                break;
+        }
+
+        // 경로가 맞춰진 상태에서 디렉터리 목록 조회
         socket_send_cmd("ls -al");
         char buf[4096] = {0}, recvbuf[8192] = {0};
         while (1)
@@ -78,8 +95,19 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
             if (line[0] == 'd')
             { // 디렉토리만 표시
                 char name[256];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %s", name) == 1)
-                    vec_push(&dl->items, &dl->count, &dl->cap, name);
+                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %255s", name) == 1)
+                {
+                    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+                    {
+                        line = strtok(NULL, "\n");
+                        continue;
+                    }
+
+                    // 서버 기준 절대경로를 넣어 탐색 시 경로가 꼬이지 않게 함
+                    char abs[PATH_MAX];
+                    path_join(abs, cwd_abs, name);
+                    vec_push(&dl->items, &dl->count, &dl->cap, abs);
+                }
             }
             line = strtok(NULL, "\n");
         }
@@ -153,6 +181,22 @@ void filelist_scan(FileList *fl, const char *dir_abs)
 
     if (socket_is_connected())
     {
+        // 🌐 서버에 요청: 디렉터리 이동 후 파일 목록 조회
+        char cd_cmd[PATH_MAX + 4];
+        snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", dir_abs);
+        socket_send_cmd(cd_cmd);
+
+        char cd_resp[512];
+        while (1)
+        {
+            int rn = socket_recv_response(cd_resp, sizeof(cd_resp));
+            if (rn <= 0)
+                break;
+            cd_resp[rn] = '\0';
+            if (strstr(cd_resp, "OK") || strstr(cd_resp, "ERR"))
+                break;
+        }
+
         socket_send_cmd("ls -al");
         char buf[4096] = {0}, recvbuf[8192] = {0};
         while (1)
@@ -171,7 +215,7 @@ void filelist_scan(FileList *fl, const char *dir_abs)
             if (line[0] == '-')
             { // 일반 파일만
                 char name[256];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %s", name) == 1)
+                if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %255s", name) == 1)
                     vec_push(&fl->items, &fl->count, &fl->cap, name);
             }
             line = strtok(NULL, "\n");
