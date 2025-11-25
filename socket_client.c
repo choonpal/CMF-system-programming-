@@ -17,8 +17,17 @@ int socket_connect_to(const char *server_ip, int port) {
 }
 
 void socket_send_cmd(const char *cmd) {
-    if (sockfd >= 0)
-        send(sockfd, cmd, strlen(cmd), 0);
+    if (sockfd < 0)
+        return;
+
+    char line[512];
+    size_t len = strlen(cmd);
+    if (len >= sizeof(line))
+        len = sizeof(line) - 1;
+    memcpy(line, cmd, len);
+    line[len] = '\n';
+    line[len + 1] = '\0';
+    send(sockfd, line, len + 1, 0);
 }
 
 int socket_recv_response(char *outbuf, size_t size) {

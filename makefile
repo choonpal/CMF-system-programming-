@@ -18,10 +18,10 @@ ifdef USE_INOTIFY
   CFLAGS += -DUSE_INOTIFY
 endif
 
-SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c
+SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c auth.c
 OBJS_CLIENT = $(SRCS_CLIENT:.c=.o)
 
-SRCS_SERVER = chat_server.c
+SRCS_SERVER = chat_server.c auth.c
 OBJS_SERVER = $(SRCS_SERVER:.c=.o)
 
 # ==========================
@@ -30,10 +30,10 @@ OBJS_SERVER = $(SRCS_SERVER:.c=.o)
 all: $(APP_CLIENT) $(APP_SERVER)
 
 $(APP_CLIENT): $(OBJS_CLIENT)
-	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS)
+	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS) -lcrypto
 
 $(APP_SERVER): $(OBJS_SERVER)
-	$(CC) $(OBJS_SERVER) -o $@ -lpthread
+	$(CC) $(OBJS_SERVER) -o $@ -lpthread -lcrypto
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

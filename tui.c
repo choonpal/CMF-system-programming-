@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "socket_client.h"
 
@@ -12,6 +13,7 @@
 #include "chat_manager.h"
 #include "input_manager.h"
 #include "utils.h"
+#include "auth.h"
 
 #ifdef USE_INOTIFY
 #include <sys/inotify.h>
@@ -26,7 +28,100 @@ typedef struct
     FileList fl;
     ChatState chat;
     FocusArea focus;
+    char username[64];
+    bool logged_in;
 } App;
+
+static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
+{
+    int pos = 0;
+    keypad(win, TRUE);
+    wmove(win, y, x);
+    wrefresh(win);
+    while (1)
+    {
+        int ch = wgetch(win);
+        if (ch == '\n' || ch == KEY_ENTER)
+        {
+            break;
+        }
+        else if ((ch == KEY_BACKSPACE || ch == 127) && pos > 0)
+        {
+            pos--;
+            mvwaddch(win, y, x + pos, ' ');
+            wmove(win, y, x + pos);
+            wrefresh(win);
+        }
+        else if (isprint(ch) && pos < maxlen - 1)
+        {
+            out[pos++] = (char)ch;
+            mvwaddch(win, y, x + pos - 1, '*');
+            wrefresh(win);
+        }
+    }
+    out[pos] = '\0';
+    return pos;
+}
+
+static bool login_prompt(App *app)
+{
+    int h, w;
+    getmaxyx(stdscr, h, w);
+    int win_w = 60, win_h = 9;
+    int sy = (h - win_h) / 2;
+    int sx = (w - win_w) / 2;
+
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        WINDOW *login = newwin(win_h, win_w, sy, sx);
+        box(login, 0, 0);
+        mvwprintw(login, 0, 2, " 로그인 ");
+        mvwprintw(login, 2, 2, "ID : ");
+        mvwprintw(login, 3, 2, "PW : ");
+        mvwprintw(login, 5, 2, "(demo 계정: admin1 / opslead)");
+        wrefresh(login);
+
+        char user[64] = {0};
+        char pass[128] = {0};
+        echo();
+        mvwgetnstr(login, 2, 8, user, (int)sizeof(user) - 1);
+        noecho();
+        capture_masked_input(login, 3, 8, pass, (int)sizeof(pass));
+
+        char hash[65];
+        hash_password(pass, hash);
+        memset(pass, 0, sizeof(pass));
+
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "LOGIN %s %s", user, hash);
+        socket_send_cmd(cmd);
+
+        char resp[256];
+        int rn = socket_recv_response(resp, sizeof(resp));
+        while (rn > 0 && strncmp(resp, "INFO:", 5) == 0)
+            rn = socket_recv_response(resp, sizeof(resp));
+
+        if (rn > 0 && strncmp(resp, "OK:", 3) == 0)
+        {
+            snprintf(app->username, sizeof(app->username), "%s", user);
+            app->logged_in = true;
+            delwin(login);
+            return true;
+        }
+
+        const char *err_msg = rn > 0 ? resp : "로그인 응답 없음";
+        mvwprintw(login, 6, 2, "서버 응답: %-50.50s", err_msg);
+        
+        mvwprintw(login, 7, 2, "로그인 실패(%d/3) - 다시 시도", attempt + 1);
+        wrefresh(login);
+        napms(1000);
+        delwin(login);
+
+        if (rn > 0 && strncmp(resp, "ERR: account locked", 20) == 0)
+            break;
+    }
+    return false;
+}
 
 /* =======================================================
    레이아웃 구성
@@ -64,7 +159,6 @@ static void layout_create(void)
    ======================================================= */
 static void app_init(App *a)
 {
-    memset(a, 0, sizeof(*a));
     a->focus = FOCUS_DIR;
 
     // 시작 디렉토리 지정(🔧 나중에 하드코딩 루트를 바꾸려면 이 값을 수정)
@@ -219,9 +313,21 @@ int main(int argc, char *argv[])
     clear();
     refresh();
 
+    App app;
+    memset(&app, 0, sizeof(app));
+
+    if (!login_prompt(&app))
+    {
+        endwin();
+        socket_close();
+        fprintf(stderr, "[tui] login failed\n");
+        return 1;
+    }
+
+    clear();
+    refresh();
     layout_create();
 
-    App app;
     app_init(&app); // ✅ 실행 즉시 바로 화면 표시
 
     refresh();
@@ -365,13 +471,12 @@ int main(int argc, char *argv[])
                 }
                 else
                 {
-                    chat_append(&app.chat, safe_username(), linebuf);
-                }
-                //
-                if (strlen(linebuf) > 0)
-                {
-                    chat_append(&app.chat, safe_username(), linebuf);
-                    app.chat.dirty = 1;
+                    const char *user = app.username[0] ? app.username : safe_username();
+                    if (strlen(linebuf) > 0)
+                    {
+                        chat_append(&app.chat, user, linebuf);
+                        app.chat.dirty = 1;
+                    }
                 }
                 app.focus = FOCUS_CHAT;
             }

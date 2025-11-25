@@ -10,13 +10,25 @@
 #include <sys/stat.h> // mkdir
 #include <dirent.h>   // opendir/readdir for optional checks
 #include <errno.h>
+#include <stdbool.h>
+#include <ctype.h>
+
+#include "auth.h"
 
 // #define PORT 5050
 #define MAX_CLIENTS 20
 
+typedef struct
+{
+    int sock;
+    bool authenticated;
+    char username[64];
+    int permission_level;
+} ClientSlot;
+
 void error_handling(char *message);
 
-static int clients[MAX_CLIENTS];
+static ClientSlot clients[MAX_CLIENTS];
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 void broadcast(const char *msg, int sender_sock)
@@ -24,16 +36,118 @@ void broadcast(const char *msg, int sender_sock)
     pthread_mutex_lock(&lock);
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (clients[i] > 0 && clients[i] != sender_sock)
-            send(clients[i], msg, strlen(msg), 0);
+        if (clients[i].sock > 0 && clients[i].authenticated && clients[i].sock != sender_sock)
+            send(clients[i].sock, msg, strlen(msg), 0);
     }
     pthread_mutex_unlock(&lock);
 }
 
+static void trim_whitespace(char *s)
+{
+    if (!s)
+        return;
+
+    // 왼쪽 공백 제거
+    while (*s && isspace((unsigned char)*s))
+        memmove(s, s + 1, strlen(s));
+
+    // 오른쪽 공백 제거
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1]))
+    {
+        s[len - 1] = '\0';
+        len--;
+    }
+}
+
+static void handle_command(ClientSlot *slot, const char *buf, const char *client_ip, int client_port)
+{
+    char msg[1100];
+
+    if (!slot->authenticated)
+    {
+        if (buf[0] == '\0')
+            return;
+
+        char cmd[16] = {0};
+        char user[64] = {0};
+        char pw_hash[80] = {0};
+        int perm = 0;
+        int remaining = -1;
+        AuthResult res = AUTH_INVALID;
+
+        int fields = sscanf(buf, "%15s %63s %79s", cmd, user, pw_hash);
+        if (fields == 3 && strcasecmp(cmd, "LOGIN") == 0)
+            res = verify_credentials(user, pw_hash, &perm, &remaining);
+
+        if (res == AUTH_OK)
+        {
+            slot->authenticated = true;
+            snprintf(slot->username, sizeof(slot->username), "%s", user);
+            slot->permission_level = perm;
+            send(slot->sock, "OK: login successful\n", strlen("OK: login successful\n"), 0);
+        }
+        else if (res == AUTH_LOCKED)
+        {
+            send(slot->sock, "ERR: account locked\n", strlen("ERR: account locked\n"), 0);
+        }
+        else if (fields == 3)
+        {
+            if (remaining >= 0)
+            {
+                char err[80];
+                snprintf(err, sizeof(err), "ERR: invalid credentials (%d tries left)\n", remaining);
+                send(slot->sock, err, strlen(err), 0);
+            }
+            else
+            {
+                send(slot->sock, "ERR: invalid credentials\n", strlen("ERR: invalid credentials\n"), 0);
+            }
+        }
+        else
+        {
+            send(slot->sock, "ERR: please login first\n", strlen("ERR: please login first\n"), 0);
+        }
+        return;
+    }
+
+    // ========== 명령어 처리 ==========
+    if (strncmp(buf, "cd ", 3) == 0)
+    {
+        if (chdir(buf + 3) == 0)
+            send(slot->sock, "OK: changed directory\n", strlen("OK: changed directory\n"), 0);
+        else
+            send(slot->sock, "ERR: invalid path\n", strlen("ERR: invalid path\n"), 0);
+    }
+    else if (strncmp(buf, "mkdir ", 6) == 0)
+    {
+        if (mkdir(buf + 6, 0755) == 0)
+            send(slot->sock, "OK: dir created\n", strlen("OK: dir created\n"), 0);
+        else
+            send(slot->sock, "ERR: mkdir failed\n", strlen("ERR: mkdir failed\n"), 0);
+    }
+    else if (strncmp(buf, "ls", 2) == 0)
+    {
+        char tmpbuf[1024];
+        FILE *fp = popen("ls -al", "r");
+        while (fgets(tmpbuf, sizeof(tmpbuf), fp))
+            send(slot->sock, tmpbuf, strlen(tmpbuf), 0);
+        pclose(fp);
+    }
+    else
+    {
+        // 일반 메시지: 서버 콘솔 출력 + 다른 클라이언트에게 브로드캐스트
+        printf("[%s:%d][%s] %s\n", client_ip, client_port, slot->username[0] ? slot->username : "?", buf);
+        snprintf(msg, sizeof(msg), "%s: %s\n", slot->username[0] ? slot->username : "client", buf);
+        broadcast(msg, slot->sock);
+        send(slot->sock, "ACK: message received\n", strlen("ACK: message received\n"), 0);
+    }
+}
+
 void *client_handler(void *arg)
 {
-    int sock = *(int *)arg;
-    free(arg);
+    ClientSlot *slot = (ClientSlot *)arg;
+    int sock = slot->sock;
 
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
@@ -46,45 +160,17 @@ void *client_handler(void *arg)
     printf("🟢 Client connected: %s:%d\n", client_ip, client_port);
 
     char buf[1024];
-    char msg[1100];
+    const char *banner = "INFO: login required\n";
+    send(sock, banner, strlen(banner), 0);
 
     while (1)
     {
         ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
         if (n <= 0)
             break; // 클라이언트 종료 또는 오류
-        buf[n] = 0;
-
-        // ========== 명령어 처리 ==========
-        if (strncmp(buf, "cd ", 3) == 0)
-        {
-            if (chdir(buf + 3) == 0)
-                send(sock, "OK: changed directory\n", 23, 0);
-            else
-                send(sock, "ERR: invalid path\n", 19, 0);
-        }
-        else if (strncmp(buf, "mkdir ", 6) == 0)
-        {
-            if (mkdir(buf + 6, 0755) == 0)
-                send(sock, "OK: dir created\n", 17, 0);
-            else
-                send(sock, "ERR: mkdir failed\n", 19, 0);
-        }
-        else if (strncmp(buf, "ls", 2) == 0)
-        {
-            FILE *fp = popen("ls -al", "r");
-            while (fgets(buf, sizeof(buf), fp))
-                send(sock, buf, strlen(buf), 0);
-            pclose(fp);
-        }
-        else
-        {
-            // 일반 메시지: 서버 콘솔 출력 + 다른 클라이언트에게 브로드캐스트
-            printf("[%s:%d] %s\n", client_ip, client_port, buf);
-            snprintf(msg, sizeof(msg), "client: %s\n", buf);
-            broadcast(msg, sock);
-            send(sock, "ACK: message received\n", 23, 0);
-        }
+        buf[n] = '\0';
+        trim_whitespace(buf);
+        handle_command(slot, buf, client_ip, client_port);
     }
 
     // 연결 종료 로그
@@ -93,8 +179,13 @@ void *client_handler(void *arg)
     close(sock);
     pthread_mutex_lock(&lock);
     for (int i = 0; i < MAX_CLIENTS; i++)
-        if (clients[i] == sock)
-            clients[i] = 0;
+        if (clients[i].sock == sock)
+        {
+            clients[i].sock = 0;
+            clients[i].authenticated = false;
+            clients[i].username[0] = '\0';
+            clients[i].permission_level = 0;
+        }
     pthread_mutex_unlock(&lock);
 
     return NULL;
@@ -187,18 +278,28 @@ int main(int argc, char *argv[])
                ntohs(clnt_addr.sin_port));
 
         pthread_mutex_lock(&lock);
+        ClientSlot *target_slot = NULL;
         for (int i = 0; i < MAX_CLIENTS; i++)
-            if (clients[i] == 0)
+            if (clients[i].sock == 0)
             {
-                clients[i] = clnt_sock;
+                clients[i].sock = clnt_sock;
+                clients[i].authenticated = false;
+                clients[i].username[0] = '\0';
+                target_slot = &clients[i];
                 break;
             }
         pthread_mutex_unlock(&lock);
 
+        if (!target_slot)
+        {
+            const char *msg = "ERR: server busy\n";
+            send(clnt_sock, msg, strlen(msg), 0);
+            close(clnt_sock);
+            continue;
+        }
+
         pthread_t tid;
-        int *arg = malloc(sizeof(int));
-        *arg = clnt_sock;
-        pthread_create(&tid, NULL, client_handler, arg);
+        pthread_create(&tid, NULL, client_handler, target_slot);
         pthread_detach(tid);
     }
 
