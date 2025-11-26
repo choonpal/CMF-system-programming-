@@ -26,6 +26,26 @@ static int cmp_str(const void *a, const void *b)
     return strcasecmp(sa, sb);
 }
 
+static bool strip_eof_marker(char *buffer)
+{
+    char *marker = strstr(buffer, "\nEOF\n");
+    if (marker)
+    {
+        *marker = '\0';
+        return true;
+    }
+
+    // EOF가 버퍼의 시작에 바로 붙어 들어올 수도 있음
+    marker = strstr(buffer, "EOF\n");
+    if (marker == buffer)
+    {
+        *marker = '\0';
+        return true;
+    }
+
+    return false;
+}
+
 /* ============================================================
    공통: 서버 연결 감지 함수
    ============================================================ */
@@ -84,7 +104,11 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
                 break;
             buf[n] = '\0';
             strncat(recvbuf, buf, sizeof(recvbuf) - strlen(recvbuf) - 1);
-            if (n < (int)sizeof(buf) - 1)
+
+            if (strip_eof_marker(recvbuf))
+                break;
+
+            if (strlen(recvbuf) >= sizeof(recvbuf) - 1)
                 break;
         }
 
@@ -206,7 +230,11 @@ void filelist_scan(FileList *fl, const char *dir_abs)
                 break;
             buf[n] = '\0';
             strncat(recvbuf, buf, sizeof(recvbuf) - strlen(recvbuf) - 1);
-            if (n < (int)sizeof(buf) - 1)
+
+            if (strip_eof_marker(recvbuf))
+                break;
+
+            if (strlen(recvbuf) >= sizeof(recvbuf) - 1)
                 break;
         }
         char *line = strtok(recvbuf, "\n");

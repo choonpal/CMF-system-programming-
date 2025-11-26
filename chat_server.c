@@ -134,6 +134,7 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
         while (fgets(tmpbuf, sizeof(tmpbuf), fp))
             send(slot->sock, tmpbuf, strlen(tmpbuf), 0);
         pclose(fp);
+        send(slot->sock, "EOF\n", strlen("EOF\n"), 0);
     }
     else
     {
