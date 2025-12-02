@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <strings.h>
+#include <unistd.h>
 
 static void vec_push(char ***arr, int *count, int *cap, const char *s)
 {
@@ -291,4 +292,96 @@ int socket_is_connected(void)
 {
 
     return (sockfd >= 0);
+}
+
+/* ============================================================
+   로컬 파일/디렉토리 브라우저 (업로드 모드)
+   ============================================================ */
+
+static int cmp_local_entry(const void *a, const void *b)
+{
+    const LocalEntry *ea = (const LocalEntry *)a;
+    const LocalEntry *eb = (const LocalEntry *)b;
+    return strcasecmp(ea->name, eb->name);
+}
+
+static void lb_push(LocalBrowser *lb, const char *name, bool is_dir)
+{
+    if (lb->count + 1 > lb->cap)
+    {
+        lb->cap = (lb->cap == 0) ? 32 : lb->cap * 2;
+        lb->items = realloc(lb->items, sizeof(LocalEntry) * lb->cap);
+    }
+    lb->items[lb->count].name = strdup(name);
+    lb->items[lb->count].is_dir = is_dir;
+    lb->count++;
+}
+
+void localbrowser_init(LocalBrowser *lb)
+{
+    memset(lb, 0, sizeof(*lb));
+    lb->selected = 0;
+}
+
+void localbrowser_free(LocalBrowser *lb)
+{
+    for (int i = 0; i < lb->count; i++)
+        free(lb->items[i].name);
+    free(lb->items);
+    memset(lb, 0, sizeof(*lb));
+}
+
+int localbrowser_scan(LocalBrowser *lb, const char *cwd)
+{
+    localbrowser_free(lb);
+    localbrowser_init(lb);
+
+    if (!cwd || !*cwd)
+    {
+        if (!getcwd(lb->cwd, sizeof(lb->cwd)))
+            snprintf(lb->cwd, sizeof(lb->cwd), ".");
+    }
+    else
+        snprintf(lb->cwd, sizeof(lb->cwd), "%s", cwd);
+
+    DIR *d = opendir(lb->cwd);
+    if (!d)
+        return -1;
+
+    struct dirent *e;
+    while ((e = readdir(d)))
+    {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+
+        char p[PATH_MAX];
+        path_join(p, lb->cwd, e->d_name);
+        bool is_dir = is_directory(p);
+        lb_push(lb, e->d_name, is_dir);
+    }
+    closedir(d);
+
+    qsort(lb->items, lb->count, sizeof(LocalEntry), cmp_local_entry);
+    lb->selected = (lb->count > 0) ? 0 : -1;
+    return lb->count;
+}
+
+void localbrowser_draw(WINDOW *win, const LocalBrowser *lb, bool focused)
+{
+    werase(win);
+    box(win, 0, 0);
+    mvwprintw(win, 0, 2, " 로컬 선택: %s ", lb->cwd);
+    int h, w;
+    getmaxyx(win, h, w);
+    for (int i = 0; i < lb->count && i < h - 2; i++)
+    {
+        const LocalEntry *ent = &lb->items[i];
+        int sel = (i == lb->selected);
+        if (sel && focused)
+            wattron(win, A_REVERSE);
+        mvwprintw(win, i + 1, 2, "%c [%c] %.*s", sel ? '>' : ' ', ent->is_dir ? 'D' : 'F', w - 7, ent->name);
+        if (sel && focused)
+            wattroff(win, A_REVERSE);
+    }
+    wrefresh(win);
 }

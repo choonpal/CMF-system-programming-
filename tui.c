@@ -26,10 +26,12 @@ typedef struct
 {
     DirList dl;
     FileList fl;
+    LocalBrowser lbrowser;
     ChatState chat;
     FocusArea focus;
     char username[64];
     bool logged_in;
+    bool upload_mode;
 } App;
 
 static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
@@ -160,6 +162,8 @@ static void layout_create(void)
 static void app_init(App *a)
 {
     a->focus = FOCUS_DIR;
+    a->upload_mode = false;
+    localbrowser_init(&a->lbrowser);
 
     // 시작 디렉토리 지정(🔧 나중에 하드코딩 루트를 바꾸려면 이 값을 수정)
     const char *start_dir = "/home";
@@ -201,6 +205,7 @@ static void app_free(App *a)
 {
     dirlist_free(&a->dl);
     filelist_free(&a->fl);
+    localbrowser_free(&a->lbrowser);
 }
 
 /* =======================================================
@@ -208,11 +213,16 @@ static void app_free(App *a)
    ======================================================= */
 static void change_focus(App *a, int dir)
 {
+    if (a->upload_mode)
+        return;
     int f = (int)a->focus;
     f = (f + dir + 4) % 4;
     a->focus = (FocusArea)f;
     dirlist_draw(win_dir, &a->dl, a->focus == FOCUS_DIR);
-    filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
+    if (a->upload_mode)
+        localbrowser_draw(win_file, &a->lbrowser, a->focus == FOCUS_FILE);
+    else
+        filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
     chat_draw(win_chat, &a->chat);
 }
 
@@ -247,6 +257,131 @@ static void go_parent_dir(App *a)
     dirlist_scan(&a->dl, parent);
     dirlist_draw(win_dir, &a->dl, a->focus == FOCUS_DIR);
     open_selected_dir(a);
+}
+
+static void upload_log(App *a, const char *msg)
+{
+    chat_append(&a->chat, "system/upload", msg);
+    a->chat.dirty = 1;
+    chat_draw(win_chat, &a->chat);
+}
+
+static void exit_upload_mode(App *a)
+{
+    a->upload_mode = false;
+    localbrowser_free(&a->lbrowser);
+    localbrowser_init(&a->lbrowser);
+    filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
+    status_bar(win_chat, "[Tab] 포커스 이동  [Enter] 선택/전송  [Backspace] 상위  [q] 종료");
+}
+
+static void start_upload_mode(App *a)
+{
+    a->upload_mode = true;
+    a->focus = FOCUS_FILE;
+
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)))
+        snprintf(cwd, sizeof(cwd), ".");
+    if (localbrowser_scan(&a->lbrowser, cwd) >= 0)
+        localbrowser_draw(win_file, &a->lbrowser, true);
+    else
+        upload_log(a, "[system/upload] Failed to read local directory");
+
+    upload_log(a, "[system/upload] Upload mode started");
+    upload_log(a, "[system/upload] Bottom-left window shows LOCAL filesystem.");
+    upload_log(a, "[system/upload] Use \u2191/\u2193 to move, Enter to enter directory, Space to select target, q to cancel.");
+    status_bar(win_chat, "Upload mode: \u2191/\u2193 move, Enter dir, Space select, q cancel");
+}
+
+static void send_upload_plan(App *a, const char *path, bool is_dir)
+{
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (!base || !*base)
+        base = path;
+
+    char base_copy[256];
+    snprintf(base_copy, sizeof(base_copy), "%.255s", base);
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "UPLOAD PLAN %s %s", is_dir ? "DIR" : "FILE", base_copy);
+    socket_send_cmd(cmd);
+
+    char response[256];
+    int rn = socket_recv_response(response, sizeof(response));
+    if (rn > 0)
+    {
+        response[rn] = '\0';
+        char msg[512];
+        snprintf(msg, sizeof(msg), "[system/upload] Server acknowledged upload plan: %s", response);
+        upload_log(a, msg);
+    }
+    else
+    {
+        upload_log(a, "[system/upload] No response from server for upload plan");
+    }
+}
+
+static void handle_upload_mode_key(App *a, int ch)
+{
+    if (ch == 'q' || ch == 'Q')
+    {
+        upload_log(a, "[system/upload] Upload mode cancelled");
+        exit_upload_mode(a);
+        return;
+    }
+
+    if (a->lbrowser.count == 0)
+    {
+        if (ch == ' ')
+        {
+            upload_log(a, "[system/upload] No items to select");
+            exit_upload_mode(a);
+        }
+        return;
+    }
+
+    if (ch == KEY_UP)
+    {
+        if (a->lbrowser.selected > 0)
+            a->lbrowser.selected--;
+        localbrowser_draw(win_file, &a->lbrowser, true);
+    }
+    else if (ch == KEY_DOWN)
+    {
+        if (a->lbrowser.selected < a->lbrowser.count - 1)
+            a->lbrowser.selected++;
+        localbrowser_draw(win_file, &a->lbrowser, true);
+    }
+    else if (ch == '\n' || ch == KEY_ENTER)
+    {
+        if (a->lbrowser.selected >= 0 && a->lbrowser.selected < a->lbrowser.count)
+        {
+            const LocalEntry *ent = &a->lbrowser.items[a->lbrowser.selected];
+            if (ent->is_dir)
+            {
+                char next[PATH_MAX];
+                path_join(next, a->lbrowser.cwd, ent->name);
+                if (localbrowser_scan(&a->lbrowser, next) >= 0)
+                    localbrowser_draw(win_file, &a->lbrowser, true);
+            }
+        }
+    }
+    else if (ch == ' ')
+    {
+        const LocalEntry *ent = &a->lbrowser.items[a->lbrowser.selected];
+        char selected_path[PATH_MAX];
+        path_join(selected_path, a->lbrowser.cwd, ent->name);
+        char msg[PATH_MAX + 64];
+        if (ent->is_dir)
+            snprintf(msg, sizeof(msg), "[system/upload] Selected directory: %s", selected_path);
+        else
+            snprintf(msg, sizeof(msg), "[system/upload] Selected file: %s", selected_path);
+        upload_log(a, msg);
+        send_upload_plan(a, selected_path, ent->is_dir);
+        exit_upload_mode(a);
+    }
 }
 
 /* =======================================================
@@ -361,6 +496,13 @@ int main(int argc, char *argv[])
         int ch = getch();
         if (ch == ERR)
             continue;
+
+        if (app.upload_mode)
+        {
+            handle_upload_mode_key(&app, ch);
+            continue;
+        }
+
         if (ch == 'q' || ch == 'Q')
             break;
 
@@ -455,7 +597,11 @@ int main(int argc, char *argv[])
                 linebuf[0] = '\0';
                 input_capture_line(win_input, linebuf, sizeof(linebuf));
                 //
-                if (strncmp(linebuf, "cd ", 3) == 0 || strncmp(linebuf, "mkdir ", 6) == 0 || strncmp(linebuf, "ls", 2) == 0)
+                if (strcmp(linebuf, "/upload") == 0)
+                {
+                    start_upload_mode(&app);
+                }
+                else if (strncmp(linebuf, "cd ", 3) == 0 || strncmp(linebuf, "mkdir ", 6) == 0 || strncmp(linebuf, "ls", 2) == 0)
                 {
 
                     socket_send_cmd(linebuf);

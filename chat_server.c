@@ -60,6 +60,26 @@ static void trim_whitespace(char *s)
     }
 }
 
+static void handle_upload_plan(ClientSlot *slot, const char *buf)
+{
+    char kind[8] = {0};
+    char name[256] = {0};
+    int matched = sscanf(buf, "UPLOAD PLAN %7s %255s", kind, name);
+    if (matched != 2)
+    {
+        const char *err = "ERR: invalid upload plan\n";
+        send(slot->sock, err, strlen(err), 0);
+        return;
+    }
+
+    bool is_dir = strcasecmp(kind, "DIR") == 0;
+    printf("[server/upload] PLAN %s %s from %s\n", is_dir ? "DIR" : "FILE", name, slot->username);
+
+    char resp[256];
+    snprintf(resp, sizeof(resp), "OK: upload plan (%s: %s)\n", is_dir ? "dir" : "file", name);
+    send(slot->sock, resp, strlen(resp), 0);
+}
+
 static void handle_command(ClientSlot *slot, const char *buf, const char *client_ip, int client_port)
 {
     char msg[1100];
@@ -135,6 +155,10 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
             send(slot->sock, tmpbuf, strlen(tmpbuf), 0);
         pclose(fp);
         send(slot->sock, "EOF\n", strlen("EOF\n"), 0);
+    }
+    else if (strncasecmp(buf, "UPLOAD PLAN", 11) == 0)
+    {
+        handle_upload_plan(slot, buf);
     }
     else
     {
