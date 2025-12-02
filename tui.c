@@ -145,14 +145,19 @@ static void layout_create(void)
     win_chat = newwin(chat_h, right_w, 0, left_w);
     win_input = newwin(3, right_w, chat_h, left_w);
 
+    // BUGFIX: 입력창에서도 펑션키/BTAB 등을 정상 감지
+    keypad(win_input, TRUE);
+
     box(win_dir, 0, 0);
     mvwprintw(win_dir, 0, 2, " 현재위치 (F1) ");
     box(win_file, 0, 0);
     mvwprintw(win_file, 0, 2, " 선택/로컬 (F2) ");
     box(win_chat, 0, 0);
-    mvwprintw(win_chat, 0, 2, " 채팅 (F3, Tab) ");
+    // BUGFIX: 채팅 블록 포커스를 제거하고 F3은 입력창으로 안내
+    mvwprintw(win_chat, 0, 2, " 채팅 로그 ");
     box(win_input, 0, 0);
-    mvwprintw(win_input, 0, 2, " 입력 (F4, Tab) ");
+    // BUGFIX: F3만 입력 포커스를 담당하도록 안내 문구 수정
+    mvwprintw(win_input, 0, 2, " 입력 (F3, Tab) ");
 
     wrefresh(win_dir);
     wrefresh(win_file);
@@ -217,7 +222,7 @@ static void redraw_all(App *a)
         wmove(win_input, 1, 4);
 
     const char *help = a->upload_mode ? "Upload mode: ↑/↓ move, Enter dir, Space select, q cancel" :
-                                   "F1: 최근위치  F2: 선택/로컬  F3: 채팅  F4: 입력  Tab: 채팅<->입력  Enter: 선택/전송  q: 종료";
+                                   "F1: 최근위치  F2: 선택/로컬  F3: 입력  Tab: 입력 이동  Enter: 선택/전송  q: 종료";
     status_bar(win_chat, help);
 }
 
@@ -509,7 +514,7 @@ int main(int argc, char *argv[])
         if (ch == 'q' || ch == 'Q')
             break;
 
-        // 🔥 F1~F4 단축키로 즉시 포커스 이동 (지시사항 2-1)
+        // 🔥 F1~F3 단축키로 즉시 포커스 이동 (지시사항 2-1 수정)
         if (ch == KEY_F(1))
         {
             change_focus(&app, FOCUS_DIR);
@@ -522,27 +527,15 @@ int main(int argc, char *argv[])
         }
         if (ch == KEY_F(3))
         {
-            change_focus(&app, FOCUS_CHAT);
+            change_focus(&app, FOCUS_INPUT);
             continue;
         }
-        if (ch == KEY_F(4))
+        // BUGFIX: 입력 중 Tab은 그대로 문자 입력, 다른 영역에서는 입력창으로만 이동
+        if (ch == '\t' && app.focus != FOCUS_INPUT)
         {
             change_focus(&app, FOCUS_INPUT);
             continue;
         }
-
-        // 🔄 Tab: 채팅<->입력 토글, 다른 영역에서는 입력으로 이동 (지시사항 2-2)
-        if (ch == '\t' || ch == KEY_BTAB)
-        {
-            if (app.focus == FOCUS_CHAT)
-                change_focus(&app, FOCUS_INPUT);
-            else if (app.focus == FOCUS_INPUT)
-                change_focus(&app, FOCUS_CHAT);
-            else
-                change_focus(&app, FOCUS_INPUT);
-            continue;
-        }
-
         switch (app.focus)
         {
         case FOCUS_DIR:
@@ -618,17 +611,34 @@ int main(int argc, char *argv[])
             break;
 
         case FOCUS_INPUT:
-            if (ch == '\n')
             {
-                // 빈 줄 방지
-            }
-            else
-            {
+                // BUGFIX: 첫 키부터 입력 버퍼에 반영되도록 전달하고 종료 키에 따라 분기
                 input_draw(win_input, true);
                 wmove(win_input, 1, 4);
                 linebuf[0] = '\0';
-                input_capture_line(win_input, linebuf, sizeof(linebuf));
-                //
+                int end_key = input_capture_line(win_input, linebuf, sizeof(linebuf), ch);
+
+                if (end_key == KEY_BTAB)
+                {
+                    change_focus(&app, FOCUS_FILE);
+                    break;
+                }
+                if (end_key == KEY_F(1))
+                {
+                    change_focus(&app, FOCUS_DIR);
+                    break;
+                }
+                if (end_key == KEY_F(2))
+                {
+                    change_focus(&app, FOCUS_FILE);
+                    break;
+                }
+                if (end_key == KEY_F(3))
+                {
+                    change_focus(&app, FOCUS_INPUT);
+                    break;
+                }
+                // 엔터 입력 시 기존 명령 처리
                 if (strcmp(linebuf, "/upload") == 0)
                 {
                     start_upload_mode(&app);
@@ -656,7 +666,7 @@ int main(int argc, char *argv[])
                         app.chat.dirty = 1;
                     }
                 }
-                change_focus(&app, FOCUS_CHAT);
+                change_focus(&app, FOCUS_INPUT);
             }
             break;
         }
