@@ -2,9 +2,11 @@
 #include "input_manager.h"
 #include <string.h>
 
-void input_draw(WINDOW *win) {
+void input_draw(WINDOW *win, bool focused) {
     werase(win); box(win,0,0);
-    mvwprintw(win,0,2," 입력 ");
+    if (focused) wattron(win, A_BOLD | A_STANDOUT);
+    mvwprintw(win,0,2," 입력 (F4, Tab) ");
+    if (focused) wattroff(win, A_BOLD | A_STANDOUT);
     mvwprintw(win,1,2,"> ");
     wmove(win,1,4);
     wrefresh(win);

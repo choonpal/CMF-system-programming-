@@ -164,7 +164,9 @@ void dirlist_draw(WINDOW *win, const DirList *dl, bool focused)
 {
     werase(win);
     box(win, 0, 0);
-    mvwprintw(win, 0, 2, " 현재위치: %s ", dl->cwd);
+    if (focused) wattron(win, A_BOLD | A_STANDOUT);
+    mvwprintw(win, 0, 2, " 현재위치 (F1): %s ", dl->cwd);
+    if (focused) wattroff(win, A_BOLD | A_STANDOUT);
     int h, w;
     getmaxyx(win, h, w);
     for (int i = 0; i < dl->count && i < h - 2; i++)
@@ -273,7 +275,9 @@ void filelist_draw(WINDOW *win, const FileList *fl, bool focused)
 {
     werase(win);
     box(win, 0, 0);
-    mvwprintw(win, 0, 2, " 선택한 디렉토리: %s ", fl->base);
+    if (focused) wattron(win, A_BOLD | A_STANDOUT);
+    mvwprintw(win, 0, 2, " 선택한 디렉토리 (F2): %s ", fl->base);
+    if (focused) wattroff(win, A_BOLD | A_STANDOUT);
     int h, w;
     getmaxyx(win, h, w);
     for (int i = 0; i < fl->count && i < h - 2; i++)
@@ -370,7 +374,9 @@ void localbrowser_draw(WINDOW *win, const LocalBrowser *lb, bool focused)
 {
     werase(win);
     box(win, 0, 0);
-    mvwprintw(win, 0, 2, " 로컬 선택: %s ", lb->cwd);
+    if (focused) wattron(win, A_BOLD | A_STANDOUT);
+    mvwprintw(win, 0, 2, " 로컬 선택 (F2): %s ", lb->cwd);
+    if (focused) wattroff(win, A_BOLD | A_STANDOUT);
     int h, w;
     getmaxyx(win, h, w);
     for (int i = 0; i < lb->count && i < h - 2; i++)

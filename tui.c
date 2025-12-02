@@ -29,10 +29,14 @@ typedef struct
     LocalBrowser lbrowser;
     ChatState chat;
     FocusArea focus;
+    FocusArea prev_focus;
     char username[64];
     bool logged_in;
     bool upload_mode;
 } App;
+
+static void redraw_all(App *a);
+static void change_focus(App *a, FocusArea next);
 
 static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
 {
@@ -142,13 +146,13 @@ static void layout_create(void)
     win_input = newwin(3, right_w, chat_h, left_w);
 
     box(win_dir, 0, 0);
-    mvwprintw(win_dir, 0, 2, " 현재위치 ");
+    mvwprintw(win_dir, 0, 2, " 현재위치 (F1) ");
     box(win_file, 0, 0);
-    mvwprintw(win_file, 0, 2, " 선택한 디렉토리 ");
+    mvwprintw(win_file, 0, 2, " 선택/로컬 (F2) ");
     box(win_chat, 0, 0);
-    mvwprintw(win_chat, 0, 2, " 채팅 ");
+    mvwprintw(win_chat, 0, 2, " 채팅 (F3, Tab) ");
     box(win_input, 0, 0);
-    mvwprintw(win_input, 0, 2, " 입력 ");
+    mvwprintw(win_input, 0, 2, " 입력 (F4, Tab) ");
 
     wrefresh(win_dir);
     wrefresh(win_file);
@@ -162,6 +166,7 @@ static void layout_create(void)
 static void app_init(App *a)
 {
     a->focus = FOCUS_DIR;
+    a->prev_focus = FOCUS_DIR;
     a->upload_mode = false;
     localbrowser_init(&a->lbrowser);
 
@@ -183,19 +188,7 @@ static void app_init(App *a)
     chat_init(&a->chat, base_dir);
 
     // 즉시 전체 화면 갱신
-    dirlist_draw(win_dir, &a->dl, true);
-    filelist_draw(win_file, &a->fl, false);
-    chat_draw(win_chat, &a->chat);
-    input_draw(win_input);
-
-    // 강제 flush
-    wrefresh(win_dir);
-    wrefresh(win_file);
-    wrefresh(win_chat);
-    wrefresh(win_input);
-
-    // 상태바 표시
-    status_bar(win_chat, "[Tab] 포커스 이동  [Enter] 선택/전송  [Backspace] 상위  [q] 종료");
+    redraw_all(a);
 }
 
 /* =======================================================
@@ -209,21 +202,31 @@ static void app_free(App *a)
 }
 
 /* =======================================================
-   포커스 이동
+   포커스 이동 헬퍼 (제목 줄 강조 및 도움말 업데이트)
    ======================================================= */
-static void change_focus(App *a, int dir)
+static void redraw_all(App *a)
 {
-    if (a->upload_mode)
-        return;
-    int f = (int)a->focus;
-    f = (f + dir + 4) % 4;
-    a->focus = (FocusArea)f;
     dirlist_draw(win_dir, &a->dl, a->focus == FOCUS_DIR);
     if (a->upload_mode)
         localbrowser_draw(win_file, &a->lbrowser, a->focus == FOCUS_FILE);
     else
         filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
-    chat_draw(win_chat, &a->chat);
+    chat_draw(win_chat, &a->chat, a->focus == FOCUS_CHAT);
+    input_draw(win_input, a->focus == FOCUS_INPUT);
+    if (a->focus == FOCUS_INPUT)
+        wmove(win_input, 1, 4);
+
+    const char *help = a->upload_mode ? "Upload mode: ↑/↓ move, Enter dir, Space select, q cancel" :
+                                   "F1: 최근위치  F2: 선택/로컬  F3: 채팅  F4: 입력  Tab: 채팅<->입력  Enter: 선택/전송  q: 종료";
+    status_bar(win_chat, help);
+}
+
+static void change_focus(App *a, FocusArea next)
+{
+    if (a->upload_mode && next != FOCUS_FILE)
+        next = FOCUS_FILE;
+    a->focus = next;
+    redraw_all(a);
 }
 
 /* =======================================================
@@ -235,9 +238,8 @@ static void open_selected_dir(App *a)
         return;
     const char *dir_abs = a->dl.items[a->dl.selected];
     filelist_scan(&a->fl, dir_abs);
-    filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
     chat_init(&a->chat, dir_abs);
-    chat_draw(win_chat, &a->chat);
+    redraw_all(a);
 }
 
 static void go_parent_dir(App *a)
@@ -255,7 +257,6 @@ static void go_parent_dir(App *a)
         return;
     }
     dirlist_scan(&a->dl, parent);
-    dirlist_draw(win_dir, &a->dl, a->focus == FOCUS_DIR);
     open_selected_dir(a);
 }
 
@@ -263,7 +264,7 @@ static void upload_log(App *a, const char *msg)
 {
     chat_append(&a->chat, "system/upload", msg);
     a->chat.dirty = 1;
-    chat_draw(win_chat, &a->chat);
+    chat_draw(win_chat, &a->chat, a->focus == FOCUS_CHAT);
 }
 
 static void exit_upload_mode(App *a)
@@ -271,12 +272,12 @@ static void exit_upload_mode(App *a)
     a->upload_mode = false;
     localbrowser_free(&a->lbrowser);
     localbrowser_init(&a->lbrowser);
-    filelist_draw(win_file, &a->fl, a->focus == FOCUS_FILE);
-    status_bar(win_chat, "[Tab] 포커스 이동  [Enter] 선택/전송  [Backspace] 상위  [q] 종료");
+    change_focus(a, a->prev_focus);
 }
 
 static void start_upload_mode(App *a)
 {
+    a->prev_focus = a->focus;
     a->upload_mode = true;
     a->focus = FOCUS_FILE;
 
@@ -291,7 +292,7 @@ static void start_upload_mode(App *a)
     upload_log(a, "[system/upload] Upload mode started");
     upload_log(a, "[system/upload] Bottom-left window shows LOCAL filesystem.");
     upload_log(a, "[system/upload] Use \u2191/\u2193 to move, Enter to enter directory, Space to select target, q to cancel.");
-    status_bar(win_chat, "Upload mode: \u2191/\u2193 move, Enter dir, Space select, q cancel");
+    redraw_all(a);
 }
 
 static void send_upload_plan(App *a, const char *path, bool is_dir)
@@ -480,7 +481,7 @@ int main(int argc, char *argv[])
         if (app.chat.dirty)
         {
             app.chat.dirty = 0;
-            chat_draw(win_chat, &app.chat);
+            chat_draw(win_chat, &app.chat, app.focus == FOCUS_CHAT);
         }
 
 #ifdef USE_INOTIFY
@@ -500,11 +501,47 @@ int main(int argc, char *argv[])
         if (app.upload_mode)
         {
             handle_upload_mode_key(&app, ch);
+            if (!app.upload_mode)
+                redraw_all(&app);
             continue;
         }
 
         if (ch == 'q' || ch == 'Q')
             break;
+
+        // 🔥 F1~F4 단축키로 즉시 포커스 이동 (지시사항 2-1)
+        if (ch == KEY_F(1))
+        {
+            change_focus(&app, FOCUS_DIR);
+            continue;
+        }
+        if (ch == KEY_F(2))
+        {
+            change_focus(&app, FOCUS_FILE);
+            continue;
+        }
+        if (ch == KEY_F(3))
+        {
+            change_focus(&app, FOCUS_CHAT);
+            continue;
+        }
+        if (ch == KEY_F(4))
+        {
+            change_focus(&app, FOCUS_INPUT);
+            continue;
+        }
+
+        // 🔄 Tab: 채팅<->입력 토글, 다른 영역에서는 입력으로 이동 (지시사항 2-2)
+        if (ch == '\t' || ch == KEY_BTAB)
+        {
+            if (app.focus == FOCUS_CHAT)
+                change_focus(&app, FOCUS_INPUT);
+            else if (app.focus == FOCUS_INPUT)
+                change_focus(&app, FOCUS_CHAT);
+            else
+                change_focus(&app, FOCUS_INPUT);
+            continue;
+        }
 
         switch (app.focus)
         {
@@ -524,8 +561,7 @@ int main(int argc, char *argv[])
             else if (ch == '\n' || ch == KEY_RIGHT)
             {
                 open_selected_dir(&app);
-                app.focus = FOCUS_FILE;
-                filelist_draw(win_file, &app.fl, true);
+                change_focus(&app, FOCUS_FILE);
             }
             else if (ch == KEY_BACKSPACE || ch == 127)
             {
@@ -556,7 +592,6 @@ int main(int argc, char *argv[])
                     if (socket_is_connected() || is_directory(tgt))
                     {
                         dirlist_scan(&app.dl, tgt);
-                        dirlist_draw(win_dir, &app.dl, app.focus == FOCUS_DIR);
                         open_selected_dir(&app);
                     }
                     else
@@ -567,21 +602,18 @@ int main(int argc, char *argv[])
             }
             else if (ch == KEY_LEFT)
             {
-                app.focus = FOCUS_DIR;
-                dirlist_draw(win_dir, &app.dl, true);
+                change_focus(&app, FOCUS_DIR);
             }
             break;
 
         case FOCUS_CHAT:
-            if (ch == '\t' || ch == KEY_RIGHT || ch == '\n')
+            if (ch == KEY_RIGHT || ch == '\n')
             {
-                app.focus = FOCUS_INPUT;
-                input_draw(win_input);
+                change_focus(&app, FOCUS_INPUT);
             }
             else if (ch == KEY_LEFT)
             {
-                app.focus = FOCUS_FILE;
-                filelist_draw(win_file, &app.fl, true);
+                change_focus(&app, FOCUS_FILE);
             }
             break;
 
@@ -592,7 +624,7 @@ int main(int argc, char *argv[])
             }
             else
             {
-                input_draw(win_input);
+                input_draw(win_input, true);
                 wmove(win_input, 1, 4);
                 linebuf[0] = '\0';
                 input_capture_line(win_input, linebuf, sizeof(linebuf));
@@ -624,15 +656,10 @@ int main(int argc, char *argv[])
                         app.chat.dirty = 1;
                     }
                 }
-                app.focus = FOCUS_CHAT;
+                change_focus(&app, FOCUS_CHAT);
             }
             break;
         }
-
-        if (ch == '\t')
-            change_focus(&app, +1);
-        else if (ch == KEY_BTAB)
-            change_focus(&app, -1);
     }
 
     app_free(&app);

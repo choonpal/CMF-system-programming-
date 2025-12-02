@@ -14,7 +14,7 @@ typedef struct {
 } ChatState;
 
 void chat_init(ChatState *st, const char *dir_abs);
-void chat_draw(WINDOW *win, const ChatState *st);
+void chat_draw(WINDOW *win, const ChatState *st, bool focused);
 bool chat_append(const ChatState *st, const char *user, const char *msg);
 void chat_check_update(ChatState *st); // 파일 변경 감지
 

@@ -11,7 +11,7 @@ typedef enum {
     FOCUS_INPUT = 3
 } FocusArea;
 
-void input_draw(WINDOW *win);
+void input_draw(WINDOW *win, bool focused);
 int  input_capture_line(WINDOW *win, char *out, int maxlen); // Enter로 종료
 void status_bar(WINDOW *chat_win, const char *msg);
 const char* focus_name(FocusArea f);
