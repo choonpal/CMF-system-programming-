@@ -20,6 +20,10 @@
 #include <fcntl.h>
 #endif
 
+// 키 코드 정의
+#define KEY_CTRL_Z 26
+#define KEY_CTRL_C 3
+
 static WINDOW *win_dir, *win_file, *win_chat, *win_input;
 
 typedef struct
@@ -153,10 +157,8 @@ static void layout_create(void)
     box(win_file, 0, 0);
     mvwprintw(win_file, 0, 2, " 선택/로컬 (F2) ");
     box(win_chat, 0, 0);
-    // BUGFIX: 채팅 블록 포커스를 제거하고 F3은 입력창으로 안내
     mvwprintw(win_chat, 0, 2, " 채팅 로그 ");
     box(win_input, 0, 0);
-    // BUGFIX: F3만 입력 포커스를 담당하도록 안내 문구 수정
     mvwprintw(win_input, 0, 2, " 입력 (F3, Tab) ");
 
     wrefresh(win_dir);
@@ -175,7 +177,7 @@ static void app_init(App *a)
     a->upload_mode = false;
     localbrowser_init(&a->lbrowser);
 
-    // 시작 디렉토리 지정(🔧 나중에 하드코딩 루트를 바꾸려면 이 값을 수정)
+    // 시작 디렉토리 지정
     const char *start_dir = "/home";
     char absdir[PATH_MAX];
     abspath(absdir, start_dir);
@@ -222,7 +224,7 @@ static void redraw_all(App *a)
         wmove(win_input, 1, 4);
 
     const char *help = a->upload_mode ? "Upload mode: ↑/↓ move, Enter dir, Space select, q cancel" :
-                                   "F1: 최근위치  F2: 선택/로컬  F3: 입력  Tab: 입력 이동  Enter: 선택/전송  q: 종료";
+                                   "F1:위치 F2:선택 F3:입력 Tab:이동 Ent:이동 Ctrl+Z:상위 q:종료";
     status_bar(win_chat, help);
 }
 
@@ -237,6 +239,7 @@ static void change_focus(App *a, FocusArea next)
 /* =======================================================
    디렉토리 선택 및 상위 이동
    ======================================================= */
+// 하단 창(Preview) 갱신용
 static void open_selected_dir(App *a)
 {
     if (a->dl.selected < 0 || a->dl.selected >= a->dl.count)
@@ -251,7 +254,6 @@ static void go_parent_dir(App *a)
 {
     char parent[PATH_MAX];
     dirname_of(parent, a->dl.cwd);
-    // 📡 원격/로컬 모두 상위 이동이 가능하도록 유효성 검사 분리
     if (socket_is_connected())
     {
         if (strcmp(parent, a->dl.cwd) == 0)
@@ -410,13 +412,11 @@ static int setup_inotify(const char *path)
 int main(int argc, char *argv[])
 {
 
-    // 호스트는 로컬 루프백으로, 포트는 5050으로 기본경로를 설정
     char host[256] = "127.0.0.1";
     int port = 5050;
 
-    // 그 외에 다른 호스트 주소랑 포트를 사용자가 입력했다면, 그 주소:포트로 기본경로 덮어쓰기
     if (argc >= 3)
-    { // 인자가 3개 이하(예 make run-client 127.0.0.1 9190) -> 형식: host port
+    { 
         strncpy(host, argv[1], sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
         int p = atoi(argv[2]);
@@ -424,7 +424,7 @@ int main(int argc, char *argv[])
             port = p;
     }
     else if (argc >= 2)
-    { // 인자가 2개 이하 -> 즉, host[:port] 처럼 호스트, 포트 붙여 보내거나 호스트 ip만 보낼 때
+    { 
         strncpy(host, argv[1], sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
         char *colon = strrchr(host, ':');
@@ -446,10 +446,10 @@ int main(int argc, char *argv[])
     setlocale(LC_ALL, "");
     initscr();
     noecho();
-    cbreak();
+    raw(); // Ctrl+Z 사용을 위해 raw 모드
     keypad(stdscr, TRUE);
     curs_set(0);
-    timeout(200); // getch() polling 주기
+    timeout(200); 
 
     clear();
     refresh();
@@ -469,7 +469,7 @@ int main(int argc, char *argv[])
     refresh();
     layout_create();
 
-    app_init(&app); // ✅ 실행 즉시 바로 화면 표시
+    app_init(&app); 
 
     refresh();
 
@@ -481,7 +481,6 @@ int main(int argc, char *argv[])
 
     for (;;)
     {
-        // 외부 로그 변경 감지
         chat_check_update(&app.chat);
         if (app.chat.dirty)
         {
@@ -511,10 +510,9 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        if (ch == 'q' || ch == 'Q')
+        if (ch == 'q' || ch == 'Q' || ch == KEY_CTRL_C)
             break;
 
-        // 🔥 F1~F3 단축키로 즉시 포커스 이동 (지시사항 2-1 수정)
         if (ch == KEY_F(1))
         {
             change_focus(&app, FOCUS_DIR);
@@ -530,33 +528,59 @@ int main(int argc, char *argv[])
             change_focus(&app, FOCUS_INPUT);
             continue;
         }
-        // BUGFIX: 입력 중 Tab은 그대로 문자 입력, 다른 영역에서는 입력창으로만 이동
         if (ch == '\t' && app.focus != FOCUS_INPUT)
         {
             change_focus(&app, FOCUS_INPUT);
             continue;
         }
+
         switch (app.focus)
         {
         case FOCUS_DIR:
             if (ch == KEY_UP)
             {
-                if (app.dl.selected > 0)
+                if (app.dl.selected > 0) {
                     app.dl.selected--;
-                dirlist_draw(win_dir, &app.dl, true);
+                    // [수정] 위로 이동 시 즉시 하단 미리보기 갱신
+                    open_selected_dir(&app);
+                }
             }
             else if (ch == KEY_DOWN)
             {
-                if (app.dl.selected < app.dl.count - 1)
+                if (app.dl.selected < app.dl.count - 1) {
                     app.dl.selected++;
-                dirlist_draw(win_dir, &app.dl, true);
+                    // [수정] 아래로 이동 시 즉시 하단 미리보기 갱신
+                    open_selected_dir(&app);
+                }
             }
-            else if (ch == '\n' || ch == KEY_RIGHT)
+            // Enter 입력 시 해당 디렉토리로 진입
+            else if (ch == '\n')
+            {
+                if (app.dl.selected >= 0 && app.dl.selected < app.dl.count)
+                {
+                    char target[PATH_MAX];
+                    snprintf(target, sizeof(target), "%s", app.dl.items[app.dl.selected]);
+                    
+                    // 상단 목록을 선택된 경로로 갱신 (디렉토리 이동)
+                    dirlist_scan(&app.dl, target);
+                    
+                    // 하단 목록 갱신
+                    if (app.dl.count > 0) {
+                        open_selected_dir(&app);
+                    } else {
+                        filelist_scan(&app.fl, target);
+                        chat_init(&app.chat, target);
+                    }
+                    redraw_all(&app);
+                }
+            }
+            else if (ch == KEY_RIGHT)
             {
                 open_selected_dir(&app);
                 change_focus(&app, FOCUS_FILE);
             }
-            else if (ch == KEY_BACKSPACE || ch == 127)
+            // Ctrl+Z 추가
+            else if (ch == KEY_BACKSPACE || ch == 127 || ch == KEY_CTRL_Z)
             {
                 go_parent_dir(&app);
             }
@@ -581,7 +605,6 @@ int main(int argc, char *argv[])
                 {
                     char tgt[PATH_MAX];
                     path_join(tgt, app.fl.base, app.fl.items[app.fl.selected]);
-                    // 📂 원격일 때는 로컬 파일 검사 대신 바로 이동 시도
                     if (socket_is_connected() || is_directory(tgt))
                     {
                         dirlist_scan(&app.dl, tgt);
@@ -596,6 +619,10 @@ int main(int argc, char *argv[])
             else if (ch == KEY_LEFT)
             {
                 change_focus(&app, FOCUS_DIR);
+            }
+            else if (ch == KEY_CTRL_Z)
+            {
+                go_parent_dir(&app);
             }
             break;
 
@@ -612,7 +639,6 @@ int main(int argc, char *argv[])
 
         case FOCUS_INPUT:
             {
-                // BUGFIX: 첫 키부터 입력 버퍼에 반영되도록 전달하고 종료 키에 따라 분기
                 input_draw(win_input, true);
                 wmove(win_input, 1, 4);
                 linebuf[0] = '\0';
@@ -638,16 +664,13 @@ int main(int argc, char *argv[])
                     change_focus(&app, FOCUS_INPUT);
                     break;
                 }
-                // 엔터 입력 시 기존 명령 처리
                 if (strcmp(linebuf, "/upload") == 0)
                 {
                     start_upload_mode(&app);
                 }
                 else if (strncmp(linebuf, "cd ", 3) == 0 || strncmp(linebuf, "mkdir ", 6) == 0 || strncmp(linebuf, "ls", 2) == 0)
                 {
-
                     socket_send_cmd(linebuf);
-
                     char response[2048];
                     while (socket_recv_response(response, sizeof(response)) > 0)
                     {

@@ -60,6 +60,7 @@ void dirlist_init(DirList *dl)
 {
     memset(dl, 0, sizeof(*dl));
     dl->selected = 0;
+    dl->top_index = 0; // 스크롤 초기화
 }
 
 void dirlist_free(DirList *dl)
@@ -78,12 +79,10 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
 
     if (socket_is_connected())
     {
-        // 🌐 서버에 요청: 원격에서도 실제 경로를 맞춰주기 위해 cd 후 ls 수행
         char cd_cmd[PATH_MAX + 4];
         snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", cwd_abs);
         socket_send_cmd(cd_cmd);
 
-        // cd 결과는 단순 확인만 하고 무시(OK/ERR 문구만 받아서 비워줌)
         char cd_resp[512];
         while (1)
         {
@@ -95,7 +94,6 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
                 break;
         }
 
-        // 경로가 맞춰진 상태에서 디렉터리 목록 조회
         socket_send_cmd("ls -al");
         char buf[4096] = {0}, recvbuf[8192] = {0};
         while (1)
@@ -113,12 +111,11 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
                 break;
         }
 
-        // 서버에서 받은 결과 파싱
         char *line = strtok(recvbuf, "\n");
         while (line)
         {
             if (line[0] == 'd')
-            { // 디렉토리만 표시
+            { 
                 char name[256];
                 if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %255s", name) == 1)
                 {
@@ -128,7 +125,6 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
                         continue;
                     }
 
-                    // 서버 기준 절대경로를 넣어 탐색 시 경로가 꼬이지 않게 함
                     char abs[PATH_MAX];
                     path_join(abs, cwd_abs, name);
                     vec_push(&dl->items, &dl->count, &dl->cap, abs);
@@ -139,7 +135,6 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
     }
     else
     {
-        // 📁 로컬 탐색 모드
         DIR *d = opendir(cwd_abs);
         if (!d)
             return;
@@ -158,26 +153,50 @@ void dirlist_scan(DirList *dl, const char *cwd_abs)
 
     qsort(dl->items, dl->count, sizeof(char *), cmp_str);
     dl->selected = (dl->count > 0) ? 0 : -1;
+    dl->top_index = 0; // 목록 갱신 시 스크롤 맨 위로
 }
 
-void dirlist_draw(WINDOW *win, const DirList *dl, bool focused)
+void dirlist_draw(WINDOW *win, DirList *dl, bool focused)
 {
     werase(win);
     box(win, 0, 0);
     if (focused) wattron(win, A_BOLD | A_STANDOUT);
     mvwprintw(win, 0, 2, " 현재위치 (F1): %s ", dl->cwd);
     if (focused) wattroff(win, A_BOLD | A_STANDOUT);
+
     int h, w;
     getmaxyx(win, h, w);
-    for (int i = 0; i < dl->count && i < h - 2; i++)
+    int list_h = h - 2; // 실제 목록이 표시될 수 있는 높이
+
+    if (list_h < 1) { // 창이 너무 작으면 갱신만 하고 리턴
+        wrefresh(win);
+        return;
+    }
+
+    // --- 스크롤 계산 로직 ---
+    if (dl->selected < dl->top_index) {
+        dl->top_index = dl->selected;
+    } 
+    else if (dl->selected >= dl->top_index + list_h) {
+        dl->top_index = dl->selected - list_h + 1;
+    }
+    
+    // 안전장치: top_index 범위 보정
+    if (dl->top_index > dl->count - list_h) dl->top_index = dl->count - list_h;
+    if (dl->top_index < 0) dl->top_index = 0;
+    // ----------------------
+
+    for (int i = 0; i < list_h; i++)
     {
-        const char *name = dl->items[i];
-        int sel = (i == dl->selected);
-        if (sel && focused)
-            wattron(win, A_REVERSE);
+        int idx = dl->top_index + i;
+        if (idx >= dl->count) break;
+
+        const char *name = dl->items[idx];
+        int sel = (idx == dl->selected);
+        
+        if (sel && focused) wattron(win, A_REVERSE);
         mvwprintw(win, i + 1, 2, "%c %.*s", sel ? '>' : ' ', w - 4, name);
-        if (sel && focused)
-            wattroff(win, A_REVERSE);
+        if (sel && focused) wattroff(win, A_REVERSE);
     }
     wrefresh(win);
 }
@@ -190,6 +209,7 @@ void filelist_init(FileList *fl)
 {
     memset(fl, 0, sizeof(*fl));
     fl->selected = 0;
+    fl->top_index = 0;
 }
 
 void filelist_free(FileList *fl)
@@ -208,7 +228,6 @@ void filelist_scan(FileList *fl, const char *dir_abs)
 
     if (socket_is_connected())
     {
-        // 🌐 서버에 요청: 디렉터리 이동 후 파일 목록 조회
         char cd_cmd[PATH_MAX + 4];
         snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", dir_abs);
         socket_send_cmd(cd_cmd);
@@ -240,14 +259,23 @@ void filelist_scan(FileList *fl, const char *dir_abs)
             if (strlen(recvbuf) >= sizeof(recvbuf) - 1)
                 break;
         }
+        
         char *line = strtok(recvbuf, "\n");
         while (line)
         {
-            if (line[0] == '-')
-            { // 일반 파일만
+            // 파일(-)과 디렉토리(d) 모두 허용
+            if (line[0] == '-' || line[0] == 'd')
+            { 
                 char name[256];
                 if (sscanf(line, "%*s %*s %*s %*s %*s %*s %*s %*s %255s", name) == 1)
+                {
+                    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+                    {
+                        line = strtok(NULL, "\n");
+                        continue;
+                    }
                     vec_push(&fl->items, &fl->count, &fl->cap, name);
+                }
             }
             line = strtok(NULL, "\n");
         }
@@ -269,32 +297,54 @@ void filelist_scan(FileList *fl, const char *dir_abs)
 
     qsort(fl->items, fl->count, sizeof(char *), cmp_str);
     fl->selected = (fl->count > 0) ? 0 : -1;
+    fl->top_index = 0;
 }
 
-void filelist_draw(WINDOW *win, const FileList *fl, bool focused)
+void filelist_draw(WINDOW *win, FileList *fl, bool focused)
 {
     werase(win);
     box(win, 0, 0);
     if (focused) wattron(win, A_BOLD | A_STANDOUT);
     mvwprintw(win, 0, 2, " 선택한 디렉토리 (F2): %s ", fl->base);
     if (focused) wattroff(win, A_BOLD | A_STANDOUT);
+
     int h, w;
     getmaxyx(win, h, w);
-    for (int i = 0; i < fl->count && i < h - 2; i++)
+    int list_h = h - 2;
+
+    if (list_h < 1) {
+        wrefresh(win);
+        return;
+    }
+
+    // --- 스크롤 계산 로직 ---
+    if (fl->selected < fl->top_index) {
+        fl->top_index = fl->selected;
+    } 
+    else if (fl->selected >= fl->top_index + list_h) {
+        fl->top_index = fl->selected - list_h + 1;
+    }
+    
+    if (fl->top_index > fl->count - list_h) fl->top_index = fl->count - list_h;
+    if (fl->top_index < 0) fl->top_index = 0;
+    // ----------------------
+
+    for (int i = 0; i < list_h; i++)
     {
-        const char *name = fl->items[i];
-        int sel = (i == fl->selected);
-        if (sel && focused)
-            wattron(win, A_REVERSE);
+        int idx = fl->top_index + i;
+        if (idx >= fl->count) break;
+
+        const char *name = fl->items[idx];
+        int sel = (idx == fl->selected);
+        if (sel && focused) wattron(win, A_REVERSE);
         mvwprintw(win, i + 1, 2, "%c %.*s", sel ? '>' : ' ', w - 4, name);
-        if (sel && focused)
-            wattroff(win, A_REVERSE);
+        if (sel && focused) wattroff(win, A_REVERSE);
     }
     wrefresh(win);
 }
+
 int socket_is_connected(void)
 {
-
     return (sockfd >= 0);
 }
 
@@ -325,6 +375,7 @@ void localbrowser_init(LocalBrowser *lb)
 {
     memset(lb, 0, sizeof(*lb));
     lb->selected = 0;
+    lb->top_index = 0;
 }
 
 void localbrowser_free(LocalBrowser *lb)
@@ -367,27 +418,49 @@ int localbrowser_scan(LocalBrowser *lb, const char *cwd)
 
     qsort(lb->items, lb->count, sizeof(LocalEntry), cmp_local_entry);
     lb->selected = (lb->count > 0) ? 0 : -1;
+    lb->top_index = 0;
     return lb->count;
 }
 
-void localbrowser_draw(WINDOW *win, const LocalBrowser *lb, bool focused)
+void localbrowser_draw(WINDOW *win, LocalBrowser *lb, bool focused)
 {
     werase(win);
     box(win, 0, 0);
     if (focused) wattron(win, A_BOLD | A_STANDOUT);
     mvwprintw(win, 0, 2, " 로컬 선택 (F2): %s ", lb->cwd);
     if (focused) wattroff(win, A_BOLD | A_STANDOUT);
+
     int h, w;
     getmaxyx(win, h, w);
-    for (int i = 0; i < lb->count && i < h - 2; i++)
+    int list_h = h - 2;
+
+    if (list_h < 1) {
+        wrefresh(win);
+        return;
+    }
+
+    // --- 스크롤 계산 로직 ---
+    if (lb->selected < lb->top_index) {
+        lb->top_index = lb->selected;
+    } 
+    else if (lb->selected >= lb->top_index + list_h) {
+        lb->top_index = lb->selected - list_h + 1;
+    }
+
+    if (lb->top_index > lb->count - list_h) lb->top_index = lb->count - list_h;
+    if (lb->top_index < 0) lb->top_index = 0;
+    // ----------------------
+
+    for (int i = 0; i < list_h; i++)
     {
-        const LocalEntry *ent = &lb->items[i];
-        int sel = (i == lb->selected);
-        if (sel && focused)
-            wattron(win, A_REVERSE);
+        int idx = lb->top_index + i;
+        if (idx >= lb->count) break;
+
+        const LocalEntry *ent = &lb->items[idx];
+        int sel = (idx == lb->selected);
+        if (sel && focused) wattron(win, A_REVERSE);
         mvwprintw(win, i + 1, 2, "%c [%c] %.*s", sel ? '>' : ' ', ent->is_dir ? 'D' : 'F', w - 7, ent->name);
-        if (sel && focused)
-            wattroff(win, A_REVERSE);
+        if (sel && focused) wattroff(win, A_REVERSE);
     }
     wrefresh(win);
 }
