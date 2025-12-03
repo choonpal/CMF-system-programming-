@@ -2,26 +2,11 @@
 #   TalkShell Makefile
 # ==========================
 
-# 빌드 시 허용 형태:
-
-# make run-client → 기본 127.0.0.1:5050
-# make run-client 127.0.0.1:9190
-# make run-client 127.0.0.1 9190
-
-
-# make run-server
-
-# # (권장) 인자 전달 버전으로 변경 시:
-# make run-server 127.0.0.1 9190
-# # 또는
-# ./chat_server 127.0.0.1 9190
-
-
 APP_CLIENT = tui_chatops
 APP_SERVER = chat_server
 
 CFLAGS = -Wall -Wextra -O2 -D_XOPEN_SOURCE=700
-LIBS = -lncursesw -lpthread -lcrypt
+LIBS = -lncursesw -lpthread
 
 # detect OS
 UNAME_S := $(shell uname -s)
@@ -33,10 +18,10 @@ ifdef USE_INOTIFY
   CFLAGS += -DUSE_INOTIFY
 endif
 
-SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c auth_manager.c
+SRCS_CLIENT = tui.c dir_manager.c chat_manager.c input_manager.c utils.c socket_client.c auth.c
 OBJS_CLIENT = $(SRCS_CLIENT:.c=.o)
 
-SRCS_SERVER = chat_server.c
+SRCS_SERVER = chat_server.c auth.c
 OBJS_SERVER = $(SRCS_SERVER:.c=.o)
 
 # ==========================
@@ -45,10 +30,10 @@ OBJS_SERVER = $(SRCS_SERVER:.c=.o)
 all: $(APP_CLIENT) $(APP_SERVER)
 
 $(APP_CLIENT): $(OBJS_CLIENT)
-	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS)
+	$(CC) $(OBJS_CLIENT) -o $@ $(LIBS) -lcrypto
 
 $(APP_SERVER): $(OBJS_SERVER)
-	$(CC) $(OBJS_SERVER) -o $@ -lpthread
+	$(CC) $(OBJS_SERVER) -o $@ -lpthread -lcrypto
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -56,7 +41,7 @@ $(APP_SERVER): $(OBJS_SERVER)
 # ==========================
 #   실행 명령
 # ==========================
-ARGS := $(filter-out $@,$(MAKECMDGOALS))
+ARGS = $(filter-out $@,$(MAKECMDGOALS))
 
 run-server: $(APP_SERVER)
 	@set -- $(ARGS); \
@@ -64,14 +49,17 @@ run-server: $(APP_SERVER)
 	  echo "🚀 Running $(APP_SERVER)"; \
 	  ./$(APP_SERVER); \
 	elif [ $$# -eq 1 ]; then \
-	  echo "🚀 Running $(APP_SERVER) → $$1"; \
-	  ./$(APP_SERVER) "$$1"; \
+	  case "$$1" in \
+	    *:*) echo "🚀 Running $(APP_SERVER) → $$1"; ./$(APP_SERVER) "$$1" ;; \
+	    *[!0-9]*) echo "🚀 Running $(APP_SERVER) → $$1"; ./$(APP_SERVER) "$$1" ;; \
+	    *) echo "🚀 Running $(APP_SERVER) → 127.0.0.1:$$1"; ./$(APP_SERVER) "127.0.0.1" "$$1" ;; \
+	  esac; \
 	else \
 	  echo "🚀 Running $(APP_SERVER) → $$1:$$2"; \
 	  ./$(APP_SERVER) "$$1" "$$2"; \
 	fi
 
-ARGS := $(filter-out $@,$(MAKECMDGOALS))
+ARGS = $(filter-out $@,$(MAKECMDGOALS))
 
 run-client: $(APP_CLIENT)
 	@set -- $(ARGS); \
@@ -88,6 +76,11 @@ run-client: $(APP_CLIENT)
 
 # make가 '127.0.0.1' 같은 추가 목표를 빌드하려고 하지 않도록 삼킴
 %:: ; @:
+
+# make run-client                      # 127.0.0.1:5050
+# make run-client HOST=192.168.0.42    # 192.168.0.42:5050
+# make run-client HOST=192.168.0.42 PORT=6000   # 192.168.0.42:6000
+# 세 개의 입력 모두 다 가능
 
 # ==========================
 #   정리 명령

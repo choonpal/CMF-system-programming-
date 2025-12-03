@@ -30,14 +30,17 @@ void chat_init(ChatState *st, const char *dir_abs) {
 
 static void draw_centered(WINDOW *win, int row, const char *msg) {
     int h,w; getmaxyx(win,h,w);
+    (void)h; // 제목 정렬 외 다른 용도 없음
     int x = (w - (int)strlen(msg)) / 2;
     if (x<1) x=1;
     mvwprintw(win, row, x, "%s", msg);
 }
 
-void chat_draw(WINDOW *win, const ChatState *st) {
+void chat_draw(WINDOW *win, const ChatState *st, bool focused) {
     werase(win); box(win,0,0);
-    mvwprintw(win,0,2," 채팅: %s ", st->dir_abs);
+    if (focused) wattron(win, A_BOLD | A_STANDOUT);
+    mvwprintw(win,0,2," 채팅 (F3, Tab): %s ", st->dir_abs);
+    if (focused) wattroff(win, A_BOLD | A_STANDOUT);
 
     FILE *fp = fopen(st->log_path, "r");
     int h,w; getmaxyx(win,h,w);

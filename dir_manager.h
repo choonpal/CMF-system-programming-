@@ -19,6 +19,18 @@ typedef struct {
     char base[PATH_MAX]; // 기준 절대경로
 } FileList;
 
+typedef struct {
+    char *name;
+    bool is_dir;
+} LocalEntry;
+
+typedef struct {
+    LocalEntry *items; // 로컬 파일/디렉토리 목록
+    int count, cap;
+    int selected;
+    char cwd[PATH_MAX];
+} LocalBrowser;
+
 void dirlist_init(DirList *dl);
 void dirlist_free(DirList *dl);
 void dirlist_scan(DirList *dl, const char *cwd_abs);
@@ -29,5 +41,10 @@ void filelist_free(FileList *fl);
 void filelist_scan(FileList *fl, const char *dir_abs);
 void filelist_draw(WINDOW *win, const FileList *fl, bool focused);
 int socket_is_connected(void);
+
+void localbrowser_init(LocalBrowser *lb);
+void localbrowser_free(LocalBrowser *lb);
+int localbrowser_scan(LocalBrowser *lb, const char *cwd);
+void localbrowser_draw(WINDOW *win, const LocalBrowser *lb, bool focused);
 
 #endif

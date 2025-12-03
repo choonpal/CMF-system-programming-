@@ -18,6 +18,5 @@ void ensure_dir(const char *path);                    // mkdir -p
 void get_home(char out[PATH_MAX]);                    // ~ 경로
 void make_log_path(char out[PATH_MAX], const char *dir_abs); // ~/.tui_chatops/chatlogs/xxxx.log
 const char* safe_username(void);
-void set_authenticated_user(const char *username);
 
 #endif
