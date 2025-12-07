@@ -19,4 +19,7 @@ void get_home(char out[PATH_MAX]);                    // ~ 경로
 void make_log_path(char out[PATH_MAX], const char *dir_abs); // ~/.tui_chatops/chatlogs/xxxx.log
 const char* safe_username(void);
 
+void build_size_bar(long size, char *out, int out_len);
+long get_file_size(const char *path);
+
 #endif

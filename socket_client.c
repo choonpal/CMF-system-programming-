@@ -42,3 +42,4 @@ void socket_close(void) {
         sockfd = -1;
     }
 }
+

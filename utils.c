@@ -1,80 +1,206 @@
-#define _XOPEN_SOURCE 700
 #include "utils.h"
+
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <errno.h>
 #include <pwd.h>
-#include <libgen.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
 
-bool is_directory(const char *path) {
+// ------------------------------------------------------------
+// 파일/디렉토리 여부
+// ------------------------------------------------------------
+bool is_directory(const char *path)
+{
     struct stat st;
-    return (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
+    if (stat(path, &st) < 0) return false;
+    return S_ISDIR(st.st_mode);
 }
-bool is_regular(const char *path) {
+
+bool is_regular(const char *path)
+{
     struct stat st;
-    return (stat(path, &st) == 0) && S_ISREG(st.st_mode);
+    if (stat(path, &st) < 0) return false;
+    return S_ISREG(st.st_mode);
 }
 
-void path_join(char out[PATH_MAX], const char *a, const char *b) {
-    if (!a || !*a) { snprintf(out, PATH_MAX, "%s", b?b:""); return; }
-    if (!b || !*b) { snprintf(out, PATH_MAX, "%s", a); return; }
-    size_t al = strlen(a);
-    if (a[al-1] == '/') snprintf(out, PATH_MAX, "%s%s", a, b);
-    else               snprintf(out, PATH_MAX, "%s/%s", a, b);
+// ------------------------------------------------------------
+// 경로 조합
+// ------------------------------------------------------------
+void path_join(char out[PATH_MAX], const char *a, const char *b)
+{
+    if (!a || !*a)
+        snprintf(out, PATH_MAX, "%s", b);
+    else if (!b || !*b)
+        snprintf(out, PATH_MAX, "%s", a);
+    else if (a[strlen(a) - 1] == '/')
+        snprintf(out, PATH_MAX, "%s%s", a, b);
+    else
+        snprintf(out, PATH_MAX, "%s/%s", a, b);
 }
 
-void abspath(char out[PATH_MAX], const char *path) {
-    if (!path || !*path) { getcwd(out, PATH_MAX); return; }
-    if (path[0] == '/') { snprintf(out, PATH_MAX, "%s", path); return; }
-    char cwd[PATH_MAX]; getcwd(cwd, sizeof(cwd));
-    path_join(out, cwd, path);
-}
+// ------------------------------------------------------------
+// 절대 경로 변환
+// ------------------------------------------------------------
+void abspath(char out[PATH_MAX], const char *path)
+{
+    char cwd[PATH_MAX];
 
-void dirname_of(char out[PATH_MAX], const char *path) {
-    char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "%s", path);
-    char *d = dirname(tmp);
-    snprintf(out, PATH_MAX, "%s", d);
-}
-
-void ensure_dir(const char *path) {
-    // mkdir -p
-    char buf[PATH_MAX]; snprintf(buf, sizeof(buf), "%s", path);
-    for (char *p = buf + 1; *p; ++p) {
-        if (*p == '/') { *p = '\0'; mkdir(buf, 0700); *p = '/'; }
+    if (!path || !*path)
+    {
+        getcwd(out, PATH_MAX);
+        return;
     }
-    mkdir(buf, 0700);
+
+    if (path[0] == '/')
+    {
+        snprintf(out, PATH_MAX, "%s", path);
+        return;
+    }
+
+    getcwd(cwd, sizeof(cwd));
+    snprintf(out, PATH_MAX, "%s/%s", cwd, path);
 }
 
-void get_home(char out[PATH_MAX]) {
+// ------------------------------------------------------------
+// dirname 구현
+// ------------------------------------------------------------
+void dirname_of(char out[PATH_MAX], const char *path)
+{
+    snprintf(out, PATH_MAX, "%s", path);
+
+    int len = strlen(out);
+    if (len == 0) return;
+
+    // 뒤 슬래시 제거
+    while (len > 1 && out[len - 1] == '/')
+        out[--len] = '\0';
+
+    char *p = strrchr(out, '/');
+    if (!p)
+    {
+        snprintf(out, PATH_MAX, ".");
+        return;
+    }
+
+    if (p == out)
+        strcpy(out, "/");
+    else
+        *p = '\0';
+}
+
+// ------------------------------------------------------------
+// mkdir -p 기능
+// ------------------------------------------------------------
+void ensure_dir(const char *path)
+{
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+
+    int len = strlen(tmp);
+    if (tmp[len - 1] == '/')
+        tmp[len - 1] = '\0';
+
+    for (char *p = tmp + 1; *p; p++)
+    {
+        if (*p == '/')
+        {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+
+    mkdir(tmp, 0755);
+}
+
+// ------------------------------------------------------------
+// 사용자 홈 경로 (~)
+// ------------------------------------------------------------
+void get_home(char out[PATH_MAX])
+{
     const char *h = getenv("HOME");
-    if (h && *h) { snprintf(out, PATH_MAX, "%s", h); return; }
-    struct passwd *pw = getpwuid(getuid());
-    snprintf(out, PATH_MAX, "%s", pw? pw->pw_dir : "/tmp");
-}
-
-static void sanitize(char *s) {
-    for (char *p=s; *p; ++p) {
-        if (*p=='/') *p='_';
-        else if (*p==' ') *p='-';
+    if (h)
+    {
+        snprintf(out, PATH_MAX, "%s", h);
+        return;
     }
+
+    struct passwd *pw = getpwuid(getuid());
+    if (pw)
+    {
+        snprintf(out, PATH_MAX, "%s", pw->pw_dir);
+        return;
+    }
+
+    snprintf(out, PATH_MAX, "/tmp");
 }
 
-void make_log_path(char out[PATH_MAX], const char *dir_abs) {
-    char home[PATH_MAX]; get_home(home);
-    char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", dir_abs);
-    sanitize(base);
-    char root[PATH_MAX]; snprintf(root, sizeof(root), "%s/.tui_chatops/chatlogs", home);
-    ensure_dir(root);
-    snprintf(out, PATH_MAX, "%s/%s.log", root, base[0]?base:"root");
+// ------------------------------------------------------------
+// 채팅 로그 경로 생성
+// ~/.tui_chatops/chatlogs/<dir_abs hash>.log
+// ------------------------------------------------------------
+void make_log_path(char out[PATH_MAX], const char *dir_abs)
+{
+    char home[PATH_MAX];
+    get_home(home);
+
+    char base[PATH_MAX];
+    snprintf(base, sizeof(base), "%s/.tui_chatops/chatlogs", home);
+    ensure_dir(base);
+
+    unsigned long h = 5381;
+    for (const char *p = dir_abs; *p; p++)
+        h = ((h << 5) + h) + (unsigned char)*p;
+
+    snprintf(out, PATH_MAX, "%s/%lx.log", base, h);
 }
 
-const char* safe_username(void) {
+// ------------------------------------------------------------
+// 안전한 username
+// ------------------------------------------------------------
+const char *safe_username(void)
+{
     const char *u = getenv("USER");
     if (u && *u) return u;
-    struct passwd *pw = getpwuid(getuid());
-    return pw && pw->pw_name ? pw->pw_name : "user";
+    return "user";
+}
+
+// ------------------------------------------------------------
+// 파일 크기 bar 생성
+// ------------------------------------------------------------
+void build_size_bar(long size, char *out, int out_len)
+{
+    if (out_len < 10)
+    {
+        if (out_len > 0) out[0] = '\0';
+        return;
+    }
+
+    long max_size = 10 * 1024 * 1024; // 10MB 기준
+    if (size > max_size) size = max_size;
+
+    int bar_width = out_len - 1;
+    int filled = (int)((double)size / max_size * bar_width);
+
+    int i = 0;
+    for (int k = 0; k < bar_width; k++)
+    {
+        if (k < filled)  out[i++] = "█"[0];
+        else             out[i++] = "░"[0];
+    }
+
+    out[i] = '\0';
+}
+
+// ------------------------------------------------------------
+// 파일 크기 읽기
+// ------------------------------------------------------------
+long get_file_size(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) < 0) return -1;
+    return (long)st.st_size;
 }
