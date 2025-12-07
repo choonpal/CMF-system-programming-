@@ -26,7 +26,7 @@ void socket_send_cmd(const char *cmd) {
         len = sizeof(line) - 1;
     memcpy(line, cmd, len);
     line[len] = '\n';
-    line[len + 1] = '\0';
+    //line[len + 1] = '\0';//이래야 끝으로 인식.
     send(sockfd, line, len + 1, 0);
 }
 
