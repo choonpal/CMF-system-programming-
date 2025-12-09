@@ -69,7 +69,16 @@ void dirlist_scan(DirList *dl, const char *cwd_abs) {
     if (socket_is_connected()) {
         char cd_cmd[PATH_MAX + 4]; snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", cwd_abs);
         socket_send_cmd(cd_cmd);
-        char r[512]; while(socket_recv_response(r, sizeof(r))>0 && !strstr(r,"OK") && !strstr(r,"ERR"));
+        
+        // [수정됨] 응답을 누적하여 확인하도록 변경 (패킷 파편화 문제 해결)
+        char r[512];
+        char acc_buf[4096] = {0}; 
+        while(socket_recv_response(r, sizeof(r)) > 0) {
+            strncat(acc_buf, r, sizeof(acc_buf) - strlen(acc_buf) - 1);
+            if (strstr(acc_buf, "OK") || strstr(acc_buf, "ERR")) {
+                break;
+            }
+        }
 
         socket_send_cmd("ls -al");
         char buf[4096]={0}, recvbuf[8192]={0};
@@ -151,7 +160,16 @@ void filelist_scan(FileList *fl, const char *dir_abs)
     if (socket_is_connected()) {
         char cd_cmd[PATH_MAX + 4]; snprintf(cd_cmd, sizeof(cd_cmd), "cd %s", dir_abs);
         socket_send_cmd(cd_cmd);
-        char r[512]; while(socket_recv_response(r, sizeof(r))>0 && !strstr(r,"OK") && !strstr(r,"ERR"));
+
+        // [수정됨] 응답을 누적하여 확인하도록 변경 (패킷 파편화 문제 해결)
+        char r[512];
+        char acc_buf[4096] = {0};
+        while(socket_recv_response(r, sizeof(r)) > 0) {
+            strncat(acc_buf, r, sizeof(acc_buf) - strlen(acc_buf) - 1);
+            if (strstr(acc_buf, "OK") || strstr(acc_buf, "ERR")) {
+                break;
+            }
+        }
 
         socket_send_cmd("ls -al");
         char buf[4096]={0}, recvbuf[8192]={0};

@@ -1,4 +1,4 @@
-// chat_server.c — TalkShell ChatOps Server (Refactored)
+// chat_server.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -33,6 +34,284 @@ typedef struct
 static ClientSlot clients[MAX_CLIENTS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static char server_root[PATH_MAX] = "/home";
+static bool is_path_under_root(const char *path);
+
+// ------------------------------------------------------------
+// TODO: TalkShell에 "/dls" 명령 구현
+// ------------------------------------------------------------
+// 이 주석 바로 아래에 필요한 static 함수/헬퍼 함수 정의를 생성하고,
+// 기존 main 루프 및 명령 파싱 switch/case 부분에 자연스럽게 통합되도록 수정하라.
+
+typedef struct
+{
+    char name[PATH_MAX];
+    unsigned long long size;
+    bool is_dir;
+    bool error;
+} DlsEntry;
+
+typedef struct
+{
+    DlsEntry *items;
+    size_t count;
+    size_t cap;
+} DlsList;
+
+static void dls_list_push(DlsList *list, const char *name, unsigned long long size, bool is_dir, bool error)
+{
+    if (list->count + 1 > list->cap)
+    {
+        size_t new_cap = (list->cap == 0) ? 16 : list->cap * 2;
+        DlsEntry *n = realloc(list->items, new_cap * sizeof(DlsEntry));
+        if (!n)
+            return;
+        list->items = n;
+        list->cap = new_cap;
+    }
+
+    DlsEntry *ent = &list->items[list->count++];
+    snprintf(ent->name, sizeof(ent->name), "%s", name);
+    ent->size = size;
+    ent->is_dir = is_dir;
+    ent->error = error;
+}
+
+static void dls_list_free(DlsList *list)
+{
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static int dls_cmp_desc(const void *a, const void *b)
+{
+    const DlsEntry *ea = (const DlsEntry *)a;
+    const DlsEntry *eb = (const DlsEntry *)b;
+
+    if (ea->size == eb->size)
+        return strcasecmp(ea->name, eb->name);
+    return (ea->size < eb->size) ? 1 : -1;
+}
+
+static unsigned long long dls_dir_size(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return 0;
+
+    if (S_ISDIR(st.st_mode))
+    {
+        DIR *dir = opendir(path);
+        if (!dir)
+            return 0;
+
+        unsigned long long total = 0;
+        struct dirent *ent;
+        while ((ent = readdir(dir)))
+        {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+
+            char child[PATH_MAX];
+            snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+            total += dls_dir_size(child);
+        }
+
+        closedir(dir);
+        return total;
+    }
+
+    return (unsigned long long)st.st_size;
+}
+
+static void dls_human_size(unsigned long long bytes, char *out, size_t len)
+{
+    const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+    int u = 0;
+    double val = (double)bytes;
+
+    while (val >= 1024.0 && u < 4)
+    {
+        val /= 1024.0;
+        u++;
+    }
+
+    snprintf(out, len, "%.1f %s", val, units[u]);
+}
+
+static int dls_resolve_path(const char *raw, char *resolved)
+{
+    char tmp[PATH_MAX];
+
+    if (!raw || !*raw)
+    {
+        snprintf(tmp, sizeof(tmp), "%s", server_root);
+    }
+    else if (raw[0] == '/')
+    {
+        snprintf(tmp, sizeof(tmp), "%s", raw);
+    }
+    else
+    {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd)))
+            return -1;
+
+        snprintf(tmp, sizeof(tmp), "%s/%s", cwd, raw);
+    }
+
+    if (!realpath(tmp, resolved))
+        return -1;
+
+    if (!is_path_under_root(resolved))
+    {
+        errno = EPERM;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void handle_dls(ClientSlot *slot, const char *buf)
+{
+    const int BAR_WIDTH = 20;
+    const int TOP_N = 10;
+
+    const char *arg = buf;
+    while (*arg == ' ')
+        arg++;
+
+    char target[PATH_MAX];
+    if (dls_resolve_path(arg, target) != 0)
+    {
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "ERR: cannot access %s\n", *arg ? arg : "<empty>");
+        send(slot->sock, msg, strlen(msg), 0);
+        send(slot->sock, "EOF\n", 4, 0);
+        return;
+    }
+
+    DIR *dir = opendir(target);
+    if (!dir)
+    {
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "ERR: cannot open %s\n", target);
+        send(slot->sock, msg, strlen(msg), 0);
+        send(slot->sock, "EOF\n", 4, 0);
+        return;
+    }
+
+    DlsList list = {0};
+    unsigned long long dir_total = 0;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)))
+    {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+
+        char child[PATH_MAX];
+        snprintf(child, sizeof(child), "%s/%s", target, ent->d_name);
+
+        struct stat st;
+        bool err = false;
+        bool is_dir = false;
+        unsigned long long sz = 0;
+
+        if (lstat(child, &st) != 0)
+        {
+            err = true;
+        }
+        else
+        {
+            is_dir = S_ISDIR(st.st_mode);
+
+            if (is_dir)
+                sz = dls_dir_size(child);
+            else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))
+                sz = (unsigned long long)st.st_size;
+            else
+                sz = 0;
+
+            dir_total += sz;
+        }
+
+        dls_list_push(&list, ent->d_name, sz, is_dir, err);
+    }
+
+    closedir(dir);
+
+    struct statvfs vfs;
+    unsigned long long fs_total = 0;
+    if (statvfs(target, &vfs) == 0)
+        fs_total = (unsigned long long)vfs.f_blocks * vfs.f_frsize;
+
+    qsort(list.items, list.count, sizeof(DlsEntry), dls_cmp_desc);
+
+    char header[PATH_MAX + 128];
+    char dir_human[64];
+    dls_human_size(dir_total, dir_human, sizeof(dir_human));
+
+    double dir_percent = (fs_total > 0 && dir_total > 0)
+                             ? ((double)dir_total / (double)fs_total * 100.0)
+                             : 0.0;
+
+    snprintf(header, sizeof(header),
+             "[dls] 용량 요약 — 기준 디렉토리: %s\n"
+             "- 디렉토리 총 용량: %s (전체 파일시스템의 %.0f%%)\n"
+             "- 엔트리 수: %zu개 (상위 %d개만 표시)\n",
+             target, dir_human, dir_percent, list.count, TOP_N);
+    send(slot->sock, header, strlen(header), 0);
+
+    size_t max_entries = (list.count > (size_t)TOP_N) ? (size_t)TOP_N : list.count;
+    for (size_t i = 0; i < max_entries; i++)
+    {
+        const DlsEntry *e = &list.items[i];
+        char bar[BAR_WIDTH * 3 + 1];
+
+        int dir_pct = (dir_total > 0) ? (int)((double)e->size / (double)dir_total * 100.0 + 0.5) : 0;
+        int bar_fill = (int)((double)dir_pct / 100.0 * BAR_WIDTH + 0.5);
+        if (bar_fill > BAR_WIDTH)
+            bar_fill = BAR_WIDTH;
+
+        int bar_pos = 0;
+        for (int k = 0; k < BAR_WIDTH && bar_pos < (int)sizeof(bar) - 4; k++)
+        {
+            if (k < bar_fill)
+                bar_pos += snprintf(bar + bar_pos, sizeof(bar) - bar_pos, "█");
+            else
+                bar[bar_pos++] = ' ';
+        }
+        bar[bar_pos] = '\0';
+
+        char size_str[64];
+        dls_human_size(e->size, size_str, sizeof(size_str));
+
+        double fs_pct = (fs_total > 0 && e->size > 0) ? ((double)e->size / (double)fs_total * 100.0) : 0.0;
+
+        char line[PATH_MAX + 200];
+        if (e->error)
+        {
+            snprintf(line, sizeof(line), "%zu) ERR: cannot access %s\n", i + 1, e->name);
+        }
+        else
+        {
+            char display_name[PATH_MAX + 4];
+            snprintf(display_name, sizeof(display_name), "%s%s", e->name, e->is_dir ? "/" : "");
+
+            if (fs_pct >= 1.0)
+                snprintf(line, sizeof(line), "%zu) %-20.20s %s  %8s   (dir: %d%%, fs: %.0f%%)\n",
+                         i + 1, display_name, bar, size_str, dir_pct, fs_pct);
+            else
+                snprintf(line, sizeof(line), "%zu) %-20.20s %s  %8s   (dir: %d%%)\n",
+                         i + 1, display_name, bar, size_str, dir_pct);
+        }
+
+        send(slot->sock, line, strlen(line), 0);
+    }
+
+    send(slot->sock, "EOF\n", 4, 0);
+    dls_list_free(&list);
+}
 
 // --- 유틸리티 함수 ---
 
@@ -240,16 +519,30 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
     }
 
     // 2. 명령어 처리
-    if (strncmp(buf, "cd ", 3) == 0)
+    // [수정됨] cd, mkdir 인식 로직 개선 (공백 유무와 상관없이 처리)
+    if (strncmp(buf, "cd", 2) == 0 && (buf[2] == ' ' || buf[2] == '\0'))
     {
-        if (chdir(buf + 3) == 0)
+        char *path = (char*)buf + 2;
+        while (*path == ' ') path++; // 공백 건너뛰기
+
+        if (*path == '\0') {
+             // 경로가 없으면 에러 (혹은 홈 디렉토리로 이동 구현 가능)
+             send(slot->sock, "ERR: path required\n", 19, 0);
+        }
+        else if (chdir(path) == 0)
             send(slot->sock, "OK: changed directory\n", 22, 0);
         else
             send(slot->sock, "ERR: invalid path\n", 18, 0);
     }
-    else if (strncmp(buf, "mkdir ", 6) == 0)
+    else if (strncmp(buf, "mkdir", 5) == 0 && (buf[5] == ' ' || buf[5] == '\0'))
     {
-        if (mkdir(buf + 6, 0755) == 0)
+        char *path = (char*)buf + 5;
+        while (*path == ' ') path++;
+
+        if (*path == '\0') {
+             send(slot->sock, "ERR: path required\n", 19, 0);
+        }
+        else if (mkdir(path, 0755) == 0)
             send(slot->sock, "OK: dir created\n", 16, 0);
         else
             send(slot->sock, "ERR: mkdir failed\n", 18, 0);
@@ -264,6 +557,10 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
             pclose(fp);
         }
         send(slot->sock, "EOF\n", 4, 0);
+    }
+    else if (strncmp(buf, "dls", 3) == 0 && (buf[3] == ' ' || buf[3] == '\0'))
+    {
+        handle_dls(slot, buf + 3);
     }
     else if (strncasecmp(buf, "UPLOAD PLAN", 11) == 0)
     {
