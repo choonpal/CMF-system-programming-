@@ -1,5 +1,5 @@
 #define _XOPEN_SOURCE 700
-#include <locale.h> //한글 인코딩
+#include <locale.h>
 #include <ncurses.h>
 #include <pthread.h>
 #include <string.h>
@@ -22,7 +22,6 @@
 #include <fcntl.h>
 #endif
 
-// 키 코드 정의
 #define KEY_CTRL_Z 26
 #define KEY_CTRL_C 3
 
@@ -47,7 +46,6 @@ static void change_focus(App *a, FocusArea next);
 static void delete_selected_entry(App *a);
 static int delete_local_path(const char *target_path);
 
-// 입력창 마스킹 처리
 static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
 {
     int pos = 0;
@@ -206,7 +204,6 @@ static void change_focus(App *a, FocusArea next)
     redraw_all(a);
 }
 
-// 선택된 디렉토리 열기
 static void open_selected_dir(App *a)
 {
     if (a->dl.selected < 0 || a->dl.selected >= a->dl.count) {
@@ -237,7 +234,6 @@ static void go_parent_dir(App *a)
     open_selected_dir(a);
 }
 
-// static int delete_local_path(const char *target_path);
 static int delete_local_path(const char *target_path)
 {
     struct stat st;
@@ -281,57 +277,41 @@ static int delete_local_path(const char *target_path)
     return 0;
 }
 
-// static void delete_selected_entry(App *a);
+// [수정됨] 경로 저장 및 복구 로직 적용
 static void delete_selected_entry(App *a)
 {
     if (a->upload_mode)
     {
         status_bar(win_chat, "업로드 모드에서는 삭제를 사용할 수 없습니다.");
-        chat_append(&a->chat, "system", "업로드 모드에서는 삭제를 사용할 수 없습니다.");
-        a->chat.dirty = 1;
         return;
     }
+
+    // 1. 현재 보고 있는 경로(삭제 후 돌아올 곳)를 미리 저장
+    char saved_path[PATH_MAX];
+    snprintf(saved_path, sizeof(saved_path), "%s", a->dl.cwd);
 
     char target_path[PATH_MAX] = {0};
     bool from_file_panel = false;
 
     if (a->last_list_focus == FOCUS_FILE)
     {
-        if (a->fl.selected < 0 || a->fl.selected >= a->fl.count)
-        {
-            status_bar(win_chat, "삭제할 파일/디렉토리가 없습니다.");
-            return;
-        }
-
+        if (a->fl.selected < 0 || a->fl.selected >= a->fl.count) return;
         path_join(target_path, a->fl.base, a->fl.items[a->fl.selected].name);
         from_file_panel = true;
     }
     else if (a->last_list_focus == FOCUS_DIR)
     {
-        if (a->dl.selected < 0 || a->dl.selected >= a->dl.count)
-        {
-            status_bar(win_chat, "삭제할 디렉토리가 없습니다.");
-            return;
-        }
-
+        if (a->dl.selected < 0 || a->dl.selected >= a->dl.count) return;
         snprintf(target_path, sizeof(target_path), "%s", a->dl.items[a->dl.selected]);
-
-        if (strcmp(target_path, "/") == 0 || strcmp(target_path, a->dl.cwd) == 0)
-        {
-            status_bar(win_chat, "현재 위치 또는 루트는 삭제할 수 없습니다.");
-            return;
-        }
-
-        size_t cwd_len = strlen(a->dl.cwd);
-        if (cwd_len > 1 && strncmp(target_path, a->dl.cwd, cwd_len) != 0)
-        {
-            status_bar(win_chat, "허용된 경로 밖은 삭제할 수 없습니다.");
-            return;
+        
+        // 현재 경로 자체를 삭제하려는 경우 상위로 이동 준비
+        if (strcmp(target_path, a->dl.cwd) == 0) {
+             dirname_of(saved_path, a->dl.cwd); // 상위 폴더를 저장
         }
     }
     else
     {
-        status_bar(win_chat, "F1 또는 F2에서 먼저 삭제할 패널과 항목을 선택하세요.");
+        status_bar(win_chat, "삭제할 항목을 선택하세요.");
         return;
     }
 
@@ -349,50 +329,45 @@ static void delete_selected_entry(App *a)
         snprintf(cmd, sizeof(cmd), "DELETE %s", target_path);
         socket_send_cmd(cmd);
 
-        char resp[2048];
+        // [중요] 응답 누적 및 ACK 확인 (멈춤 방지)
+        char resp[512];
+        char acc_buf[4096] = {0};
         int rn;
         while ((rn = socket_recv_response(resp, sizeof(resp))) > 0)
         {
-            resp[rn] = '\0';
+            strncat(acc_buf, resp, sizeof(acc_buf) - strlen(acc_buf) - 1);
             chat_append(&a->chat, "server", resp);
 
-            if (strncmp(resp, "OK", 2) == 0)
-            {
-                success = true;
-                break;
-            }
-            if (strncmp(resp, "ERR", 3) == 0)
-            {
-                snprintf(errmsg, sizeof(errmsg), "%s", resp);
-                break;
+            if (strstr(acc_buf, "OK")) { success = true; break; }
+            if (strstr(acc_buf, "ERR")) { snprintf(errmsg, sizeof(errmsg), "%s", acc_buf); break; }
+            if (strstr(acc_buf, "ACK")) { 
+                // 서버가 명령을 채팅으로 오인함 -> 실패로 처리하고 루프 탈출 (멈춤 방지)
+                snprintf(errmsg, sizeof(errmsg), "서버가 명령을 인식하지 못했습니다 (ACK).");
+                break; 
             }
         }
-
-        if (!success && errmsg[0] == '\0')
-            snprintf(errmsg, sizeof(errmsg), "서버 응답이 없습니다.");
     }
     else
     {
-        if (delete_local_path(target_path) == 0)
-            success = true;
-        else
-            snprintf(errmsg, sizeof(errmsg), "%s", strerror(errno));
+        if (delete_local_path(target_path) == 0) success = true;
+        else snprintf(errmsg, sizeof(errmsg), "%s", strerror(errno));
     }
 
     if (success)
     {
         status_bar(win_chat, "삭제 완료");
-
-        if (from_file_panel)
+        
+        // 2. 저장해둔 경로로 복구 (새로고침)
+        if (from_file_panel) {
+            // 파일 패널에서 삭제했으면 현재 디렉토리 파일 목록 갱신
             filelist_scan(&a->fl, a->fl.base);
-        else
-        {
-            dirlist_scan(&a->dl, a->dl.cwd);
+        } else {
+            // 디렉토리 패널에서 삭제했으면 저장된 경로로 이동
+            dirlist_scan(&a->dl, saved_path);
             open_selected_dir(a);
         }
-
+        
         redraw_all(a);
-
         snprintf(logmsg, sizeof(logmsg), "삭제 완료: %s", target_path);
         chat_append(&a->chat, "system", logmsg);
     }
@@ -402,7 +377,6 @@ static void delete_selected_entry(App *a)
         status_bar(win_chat, logmsg);
         chat_append(&a->chat, "system", logmsg);
     }
-
     a->chat.dirty = 1;
 }
 
@@ -926,9 +900,6 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            /* ============================================================
-               [dls 기능 추가] — 기존 기능에 영향 X
-               ============================================================ */
             if (strncmp(linebuf, "dls ", 4) == 0)
             {
                 const char *filename = linebuf + 4;
@@ -983,11 +954,15 @@ int main(int argc, char *argv[])
             {
                 socket_send_cmd(linebuf);
 
-                char r[2048];
+                // [수정됨] 누적 버퍼 + ACK 확인
+                char r[512];
+                char acc_buf[4096] = {0};
                 while (socket_recv_response(r, sizeof(r)) > 0)
                 {
+                    strncat(acc_buf, r, sizeof(acc_buf) - strlen(acc_buf) - 1);
                     chat_append(&app.chat, "server", r);
-                    if (strstr(r, "OK") || strstr(r, "ERR"))
+                    
+                    if (strstr(acc_buf, "OK") || strstr(acc_buf, "ERR") || strstr(acc_buf, "ACK"))
                         break;
                 }
 

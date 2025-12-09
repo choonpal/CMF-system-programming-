@@ -1,4 +1,4 @@
-// chat_server.c — TalkShell ChatOps Server (Refactored)
+// chat_server.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -240,16 +240,30 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
     }
 
     // 2. 명령어 처리
-    if (strncmp(buf, "cd ", 3) == 0)
+    // [수정됨] cd, mkdir 인식 로직 개선 (공백 유무와 상관없이 처리)
+    if (strncmp(buf, "cd", 2) == 0 && (buf[2] == ' ' || buf[2] == '\0'))
     {
-        if (chdir(buf + 3) == 0)
+        char *path = (char*)buf + 2;
+        while (*path == ' ') path++; // 공백 건너뛰기
+
+        if (*path == '\0') {
+             // 경로가 없으면 에러 (혹은 홈 디렉토리로 이동 구현 가능)
+             send(slot->sock, "ERR: path required\n", 19, 0);
+        }
+        else if (chdir(path) == 0)
             send(slot->sock, "OK: changed directory\n", 22, 0);
         else
             send(slot->sock, "ERR: invalid path\n", 18, 0);
     }
-    else if (strncmp(buf, "mkdir ", 6) == 0)
+    else if (strncmp(buf, "mkdir", 5) == 0 && (buf[5] == ' ' || buf[5] == '\0'))
     {
-        if (mkdir(buf + 6, 0755) == 0)
+        char *path = (char*)buf + 5;
+        while (*path == ' ') path++;
+
+        if (*path == '\0') {
+             send(slot->sock, "ERR: path required\n", 19, 0);
+        }
+        else if (mkdir(path, 0755) == 0)
             send(slot->sock, "OK: dir created\n", 16, 0);
         else
             send(slot->sock, "ERR: mkdir failed\n", 18, 0);
