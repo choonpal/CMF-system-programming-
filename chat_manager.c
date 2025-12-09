@@ -86,6 +86,14 @@ bool chat_append(const ChatState *st, const char *user, const char *msg) {
     return true;
 }
 
+bool chat_append_raw(const ChatState *st, const char *msg) {
+    FILE *fp = fopen(st->log_path, "a");
+    if (!fp) return false;
+    fprintf(fp, "%s\n", msg ? msg : "");
+    fclose(fp);
+    return true;
+}
+
 void chat_check_update(ChatState *st) {
     struct stat s;
     if (stat(st->log_path, &s)==0) {

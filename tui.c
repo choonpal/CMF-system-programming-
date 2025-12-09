@@ -45,6 +45,7 @@ static void redraw_all(App *a);
 static void change_focus(App *a, FocusArea next);
 static void delete_selected_entry(App *a);
 static int delete_local_path(const char *target_path);
+static void handle_dls_command(App *app, const char *linebuf);
 
 static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
 {
@@ -275,6 +276,113 @@ static int delete_local_path(const char *target_path)
     }
 
     return 0;
+}
+
+static bool strip_eof_marker(char *buffer)
+{
+    char *marker = strstr(buffer, "\nEOF\n");
+    if (marker)
+    {
+        *marker = '\0';
+        return true;
+    }
+
+    marker = strstr(buffer, "EOF\n");
+    if (marker == buffer)
+    {
+        *marker = '\0';
+        return true;
+    }
+
+    return false;
+}
+
+static void request_dls(App *app, const char *target_dir)
+{
+    if (!target_dir || !*target_dir)
+        return;
+
+    status_bar(win_chat, "디스크 사용량 분석 중...");
+
+    char cmd[PATH_MAX + 8];
+    snprintf(cmd, sizeof(cmd), "dls %s", target_dir);
+    socket_send_cmd(cmd);
+
+    size_t cap = 4096, len = 0;
+    char *acc = calloc(cap, 1);
+    char buf[512];
+
+    while (acc && socket_recv_response(buf, sizeof(buf)) > 0)
+    {
+        size_t need = len + strlen(buf) + 1;
+        if (need > cap)
+        {
+            size_t new_cap = cap * 2;
+            while (new_cap < need)
+                new_cap *= 2;
+
+            char *tmp = realloc(acc, new_cap);
+            if (!tmp)
+            {
+                free(acc);
+                acc = NULL;
+                break;
+            }
+
+            acc = tmp;
+            cap = new_cap;
+        }
+
+        memcpy(acc + len, buf, strlen(buf));
+        len += strlen(buf);
+        acc[len] = '\0';
+
+        if (strip_eof_marker(acc))
+            break;
+
+        if (len >= cap - 1)
+            break;
+    }
+
+    if (!acc)
+        return;
+
+    char *line = strtok(acc, "\n");
+    while (line)
+    {
+        chat_append_raw(&app->chat, line);
+        line = strtok(NULL, "\n");
+    }
+
+    app->chat.dirty = 1;
+    chat_draw(win_chat, &app->chat, app->focus == FOCUS_CHAT);
+
+    free(acc);
+}
+
+static void handle_dls_command(App *app, const char *linebuf)
+{
+    char target[PATH_MAX];
+
+    if (strcmp(linebuf, "/dls") == 0)
+    {
+        snprintf(target, sizeof(target), "%s", app->dl.cwd);
+    }
+    else
+    {
+        const char *raw = linebuf + 4;
+        while (*raw == ' ')
+            raw++;
+
+        if (!*raw)
+            snprintf(target, sizeof(target), "%s", app->dl.cwd);
+        else if (raw[0] == '/')
+            snprintf(target, sizeof(target), "%s", raw);
+        else
+            path_join(target, app->dl.cwd, raw);
+    }
+
+    request_dls(app, target);
 }
 
 // [수정됨] 경로 저장 및 복구 로직 적용
@@ -900,36 +1008,9 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            if (strncmp(linebuf, "dls ", 4) == 0)
+            if (strcmp(linebuf, "/dls") == 0 || strncmp(linebuf, "/dls ", 5) == 0)
             {
-                const char *filename = linebuf + 4;
-
-                long size = get_file_size(filename);
-
-                if (size < 0)
-                {
-                    chat_append(&app.chat,
-                                "system",
-                                "[dls] 파일을 찾을 수 없습니다.");
-                }
-                else
-                {
-                    char bar[32];
-                    build_size_bar(size, bar, sizeof(bar));
-
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
-                             "[파일 정보]\n"
-                             "이름: %s\n"
-                             "용량: %ld bytes\n"
-                             "크기바: %s",
-                             filename, size, bar);
-
-                    chat_append(&app.chat, "system", msg);
-                }
-
-                app.chat.dirty = 1;
-                change_focus(&app, FOCUS_CHAT);
+                handle_dls_command(&app, linebuf);
                 break;
             }
 
