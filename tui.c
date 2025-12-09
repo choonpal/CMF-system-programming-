@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "socket_client.h"
 #include "dir_manager.h"
@@ -33,6 +36,7 @@ typedef struct
     ChatState chat;
     FocusArea focus;
     FocusArea prev_focus;
+    FocusArea last_list_focus;
     char username[64];
     bool logged_in;
     bool upload_mode;
@@ -40,6 +44,8 @@ typedef struct
 
 static void redraw_all(App *a);
 static void change_focus(App *a, FocusArea next);
+static void delete_selected_entry(App *a);
+static int delete_local_path(const char *target_path);
 
 // 입력창 마스킹 처리
 static int capture_masked_input(WINDOW *win, int y, int x, char *out, int maxlen)
@@ -193,6 +199,9 @@ static void change_focus(App *a, FocusArea next)
     if (a->upload_mode && next != FOCUS_FILE)
         next = FOCUS_FILE;
 
+    if (next == FOCUS_DIR || next == FOCUS_FILE)
+        a->last_list_focus = next;
+
     a->focus = next;
     redraw_all(a);
 }
@@ -226,6 +235,175 @@ static void go_parent_dir(App *a)
 
     dirlist_scan(&a->dl, parent);
     open_selected_dir(a);
+}
+
+// static int delete_local_path(const char *target_path);
+static int delete_local_path(const char *target_path)
+{
+    struct stat st;
+
+    if (lstat(target_path, &st) < 0)
+        return -1;
+
+    if (S_ISDIR(st.st_mode))
+    {
+        DIR *dir = opendir(target_path);
+        if (!dir)
+            return -1;
+
+        struct dirent *ent;
+        while ((ent = readdir(dir)))
+        {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+
+            char child[PATH_MAX];
+            path_join(child, target_path, ent->d_name);
+
+            if (delete_local_path(child) != 0)
+            {
+                closedir(dir);
+                return -1;
+            }
+        }
+
+        closedir(dir);
+
+        if (rmdir(target_path) != 0)
+            return -1;
+    }
+    else
+    {
+        if (remove(target_path) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+// static void delete_selected_entry(App *a);
+static void delete_selected_entry(App *a)
+{
+    if (a->upload_mode)
+    {
+        status_bar(win_chat, "업로드 모드에서는 삭제를 사용할 수 없습니다.");
+        chat_append(&a->chat, "system", "업로드 모드에서는 삭제를 사용할 수 없습니다.");
+        a->chat.dirty = 1;
+        return;
+    }
+
+    char target_path[PATH_MAX] = {0};
+    bool from_file_panel = false;
+
+    if (a->last_list_focus == FOCUS_FILE)
+    {
+        if (a->fl.selected < 0 || a->fl.selected >= a->fl.count)
+        {
+            status_bar(win_chat, "삭제할 파일/디렉토리가 없습니다.");
+            return;
+        }
+
+        path_join(target_path, a->fl.base, a->fl.items[a->fl.selected].name);
+        from_file_panel = true;
+    }
+    else if (a->last_list_focus == FOCUS_DIR)
+    {
+        if (a->dl.selected < 0 || a->dl.selected >= a->dl.count)
+        {
+            status_bar(win_chat, "삭제할 디렉토리가 없습니다.");
+            return;
+        }
+
+        snprintf(target_path, sizeof(target_path), "%s", a->dl.items[a->dl.selected]);
+
+        if (strcmp(target_path, "/") == 0 || strcmp(target_path, a->dl.cwd) == 0)
+        {
+            status_bar(win_chat, "현재 위치 또는 루트는 삭제할 수 없습니다.");
+            return;
+        }
+
+        size_t cwd_len = strlen(a->dl.cwd);
+        if (cwd_len > 1 && strncmp(target_path, a->dl.cwd, cwd_len) != 0)
+        {
+            status_bar(win_chat, "허용된 경로 밖은 삭제할 수 없습니다.");
+            return;
+        }
+    }
+    else
+    {
+        status_bar(win_chat, "F1 또는 F2에서 먼저 삭제할 패널과 항목을 선택하세요.");
+        return;
+    }
+
+    char logmsg[PATH_MAX + 64];
+    snprintf(logmsg, sizeof(logmsg), "삭제 시도: %s", target_path);
+    chat_append(&a->chat, "system", logmsg);
+    a->chat.dirty = 1;
+
+    bool success = false;
+    char errmsg[256] = {0};
+
+    if (socket_is_connected())
+    {
+        char cmd[PATH_MAX + 16];
+        snprintf(cmd, sizeof(cmd), "DELETE %s", target_path);
+        socket_send_cmd(cmd);
+
+        char resp[2048];
+        int rn;
+        while ((rn = socket_recv_response(resp, sizeof(resp))) > 0)
+        {
+            resp[rn] = '\0';
+            chat_append(&a->chat, "server", resp);
+
+            if (strncmp(resp, "OK", 2) == 0)
+            {
+                success = true;
+                break;
+            }
+            if (strncmp(resp, "ERR", 3) == 0)
+            {
+                snprintf(errmsg, sizeof(errmsg), "%s", resp);
+                break;
+            }
+        }
+
+        if (!success && errmsg[0] == '\0')
+            snprintf(errmsg, sizeof(errmsg), "서버 응답이 없습니다.");
+    }
+    else
+    {
+        if (delete_local_path(target_path) == 0)
+            success = true;
+        else
+            snprintf(errmsg, sizeof(errmsg), "%s", strerror(errno));
+    }
+
+    if (success)
+    {
+        status_bar(win_chat, "삭제 완료");
+
+        if (from_file_panel)
+            filelist_scan(&a->fl, a->fl.base);
+        else
+        {
+            dirlist_scan(&a->dl, a->dl.cwd);
+            open_selected_dir(a);
+        }
+
+        redraw_all(a);
+
+        snprintf(logmsg, sizeof(logmsg), "삭제 완료: %s", target_path);
+        chat_append(&a->chat, "system", logmsg);
+    }
+    else
+    {
+        snprintf(logmsg, sizeof(logmsg), "삭제 실패: %s (%s)", target_path, errmsg);
+        status_bar(win_chat, logmsg);
+        chat_append(&a->chat, "system", logmsg);
+    }
+
+    a->chat.dirty = 1;
 }
 
 static void upload_log(App *a, const char *msg)
@@ -345,7 +523,7 @@ static void start_upload_mode(App *a)
 {
     a->prev_focus = a->focus;
     a->upload_mode = true;
-    a->focus = FOCUS_FILE;
+    change_focus(a, FOCUS_FILE);
 
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd)))
@@ -481,6 +659,7 @@ static void app_init(App *a)
 {
     a->focus = FOCUS_DIR;
     a->prev_focus = FOCUS_DIR;
+    a->last_list_focus = FOCUS_DIR;
     a->upload_mode = false;
 
     localbrowser_init(&a->lbrowser);
@@ -787,6 +966,13 @@ int main(int argc, char *argv[])
             if (strcmp(linebuf, "/upload") == 0)
             {
                 start_upload_mode(&app);
+                break;
+            }
+
+            if (strcmp(linebuf, "/delete") == 0)
+            {
+                delete_selected_entry(&app);
+                change_focus(&app, FOCUS_INPUT);
                 break;
             }
 

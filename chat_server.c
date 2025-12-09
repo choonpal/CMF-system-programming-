@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "auth.h"
 
@@ -31,6 +32,7 @@ typedef struct
 
 static ClientSlot clients[MAX_CLIENTS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static char server_root[PATH_MAX] = "/home";
 
 // --- 유틸리티 함수 ---
 
@@ -47,6 +49,63 @@ static void trim_whitespace(char *s)
     while (*s && isspace((unsigned char)*s)) memmove(s, s + 1, strlen(s));
     size_t len = strlen(s);
     while (len > 0 && isspace((unsigned char)s[len - 1])) { s[len - 1] = '\0'; len--; }
+}
+
+static bool is_path_under_root(const char *path)
+{
+    if (!path || !server_root[0])
+        return false;
+
+    size_t root_len = strlen(server_root);
+    if (root_len == 1 && server_root[0] == '/')
+        return path[0] == '/';
+
+    if (strncmp(path, server_root, root_len) != 0)
+        return false;
+
+    return path[root_len] == '\0' || path[root_len] == '/';
+}
+
+static int delete_path_recursive(const char *target)
+{
+    struct stat st;
+    if (lstat(target, &st) != 0)
+        return -1;
+
+    if (S_ISDIR(st.st_mode))
+    {
+        DIR *dir = opendir(target);
+        if (!dir)
+            return -1;
+
+        struct dirent *ent;
+        while ((ent = readdir(dir)))
+        {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+
+            char child[PATH_MAX];
+            snprintf(child, sizeof(child), "%s/%s", target, ent->d_name);
+
+            if (delete_path_recursive(child) != 0)
+            {
+                closedir(dir);
+                return -1;
+            }
+        }
+
+        closedir(dir);
+
+        if (rmdir(target) != 0)
+            return -1;
+    }
+    else
+    {
+        if (remove(target) != 0)
+            return -1;
+    }
+
+    return 0;
 }
 
 void broadcast(const char *msg, int sender_sock)
@@ -214,6 +273,48 @@ static void handle_command(ClientSlot *slot, const char *buf, const char *client
     {
         handle_upload_start(slot, buf);
     }
+    else if (strncasecmp(buf, "DELETE ", 7) == 0)
+    {
+        const char *raw_path = buf + 7;
+        while (*raw_path == ' ')
+            raw_path++;
+
+        if (!*raw_path)
+        {
+            const char *msg = "ERR DELETE : invalid path\n";
+            send(slot->sock, msg, strlen(msg), 0);
+            return;
+        }
+
+        char resolved[PATH_MAX];
+        if (!realpath(raw_path, resolved))
+        {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "ERR DELETE %s : %s\n", raw_path, strerror(errno));
+            send(slot->sock, msg, strlen(msg), 0);
+            return;
+        }
+
+        if (!is_path_under_root(resolved) || strcmp(resolved, server_root) == 0)
+        {
+            const char *msg = "ERR INVALID_PATH\n";
+            send(slot->sock, msg, strlen(msg), 0);
+            return;
+        }
+
+        if (delete_path_recursive(resolved) == 0)
+        {
+            char msg[PATH_MAX + 32];
+            snprintf(msg, sizeof(msg), "OK DELETE %s\n", resolved);
+            send(slot->sock, msg, strlen(msg), 0);
+        }
+        else
+        {
+            char msg[PATH_MAX + 64];
+            snprintf(msg, sizeof(msg), "ERR DELETE %s : %s\n", resolved, strerror(errno));
+            send(slot->sock, msg, strlen(msg), 0);
+        }
+    }
     else
     {
         // 3. 일반 채팅 메시지 처리
@@ -307,6 +408,10 @@ int main(int argc, char *argv[])
     // 서버 시작 디렉토리 설정
     if (chdir("/home") != 0) {
         perror("chdir failed");
+    }
+    else
+    {
+        getcwd(server_root, sizeof(server_root));
     }
     printf("📁 Server base directory: /home\n");
 
